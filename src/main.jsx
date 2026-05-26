@@ -14,6 +14,87 @@ const SOMNIA_CHAIN_ID = 50312;
 const SOMNIA_RPC_URL = "https://api.infra.testnet.somnia.network";
 const RECEIPTS_URL = "https://receipts.testnet.agents.somnia.host";
 const CONTRACT_ADDRESS = import.meta.env.VITE_DISPUTE_ESCROW_ADDRESS || "";
+const SITE_URL = import.meta.env.VITE_SITE_URL || "https://gavel.example.com";
+const SUPPORTED_PAGES = new Set(["overview", "cases", "create", "evidence", "arbitration", "verdict", "receipt"]);
+
+function getInitialUiState() {
+  if (typeof window === "undefined") {
+    return { view: "landing", page: "overview" };
+  }
+
+  const params = new URLSearchParams(window.location.search);
+  const view = params.get("view") === "app" ? "app" : "landing";
+  const page = SUPPORTED_PAGES.has(params.get("page")) ? params.get("page") : "overview";
+
+  return { view, page };
+}
+
+function getSeoContent(view, page, activeDispute) {
+  if (view === "landing") {
+    return {
+      title: "Gavel - Onchain AI Court on Somnia",
+      description:
+        "Gavel is a Somnia-powered onchain dispute resolution app that uses validator-executed AI agents to parse evidence, decide verdicts, and release escrow.",
+      keywords:
+        "Gavel, Somnia, onchain AI, dispute resolution, escrow, smart contract arbitration, LLM Parse Website, LLM Inference, Somnia agents, blockchain court"
+    };
+  }
+
+  const disputeLabel = activeDispute?.latestRequestId ? `Case #${activeDispute.latestRequestId}` : "Live case";
+
+  const pageMap = {
+    overview: {
+      title: "Gavel Dashboard - Onchain AI Court",
+      description: "Monitor active disputes, agent performance, and onchain verdict activity in the Gavel dashboard."
+    },
+    cases: {
+      title: "Gavel Cases - Onchain Dispute List",
+      description: "Browse live and historical disputes resolved through Somnia-powered onchain arbitration."
+    },
+    create: {
+      title: "Create a Gavel Dispute",
+      description: "Open a new onchain dispute, lock escrow, and prepare evidence for Somnia agent review."
+    },
+    evidence: {
+      title: "Submit Evidence - Gavel",
+      description: "Submit plaintiff and defendant evidence URLs before requesting Somnia agent arbitration."
+    },
+    arbitration: {
+      title: `Live Hearing - ${disputeLabel} | Gavel`,
+      description: "Follow the live Somnia agent hearing as evidence is parsed and a verdict is prepared."
+    },
+    verdict: {
+      title: `Verdict - ${disputeLabel} | Gavel`,
+      description: "Review the final onchain verdict, confidence level, and payout outcome for the dispute."
+    },
+    receipt: {
+      title: `Audit Receipt - ${disputeLabel} | Gavel`,
+      description: "Inspect the Somnia execution receipt and review the validator-backed audit trail."
+    }
+  };
+
+  return {
+    title: pageMap[page]?.title || "Gavel - Onchain AI Court on Somnia",
+    description:
+      pageMap[page]?.description ||
+      "Gavel is a Somnia-powered onchain dispute resolution app with validator-executed AI agents and audit receipts.",
+    keywords:
+      "Gavel, Somnia, dispute resolution, escrow, onchain AI, smart contract, receipt, arbitration, LLM Parse Website, LLM Inference"
+  };
+}
+
+function setMetaContent(selector, attribute, value) {
+  let element = document.head.querySelector(selector);
+  if (!element) {
+    element = document.createElement("meta");
+    const match = selector.match(/meta\[(name|property)="([^"]+)"\]/);
+    if (match) {
+      element.setAttribute(match[1], match[2]);
+    }
+    document.head.appendChild(element);
+  }
+  element.setAttribute(attribute, value);
+}
 
 const somniaTestnet = defineChain({
   id: SOMNIA_CHAIN_ID,
@@ -94,8 +175,9 @@ function App() {
   const chainId = useChainId();
   const { switchChainAsync } = useSwitchChain();
   const { data: walletClient } = useWalletClient();
-  const [view, setView] = useState(() => (isConnected ? "app" : "landing"));
-  const [page, setPage] = useState("overview");
+  const initialUi = getInitialUiState();
+  const [view, setView] = useState(initialUi.view);
+  const [page, setPage] = useState(initialUi.page);
   const [notice, setNotice] = useState("");
   const [busy, setBusy] = useState(false);
   const [disputeId, setDisputeId] = useState("");
@@ -120,6 +202,50 @@ function App() {
 
     setView("app");
   }, [isConnected, chainId]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+
+    const onPopState = () => {
+      const next = getInitialUiState();
+      setView(next.view);
+      setPage(next.page);
+    };
+
+    window.addEventListener("popstate", onPopState);
+    return () => window.removeEventListener("popstate", onPopState);
+  }, []);
+
+  useEffect(() => {
+    if (typeof document === "undefined") return;
+
+    const seo = getSeoContent(view, page, activeDispute);
+    document.title = seo.title;
+    setMetaContent('meta[name="description"]', "content", seo.description);
+    setMetaContent('meta[name="keywords"]', "content", seo.keywords);
+    setMetaContent('meta[property="og:title"]', "content", seo.title);
+    setMetaContent('meta[property="og:description"]', "content", seo.description);
+    setMetaContent('meta[name="twitter:title"]', "content", seo.title);
+    setMetaContent('meta[name="twitter:description"]', "content", seo.description);
+
+    const canonical = document.head.querySelector('link[rel="canonical"]');
+    if (canonical) canonical.setAttribute("href", `${SITE_URL}/${view === "landing" ? "" : `?view=app&page=${page}`}`);
+  }, [view, page, activeDispute]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+
+    const params = new URLSearchParams();
+    if (view === "app") {
+      params.set("view", "app");
+      params.set("page", page);
+    }
+
+    const nextUrl = `${window.location.pathname}${params.toString() ? `?${params.toString()}` : ""}${window.location.hash}`;
+    if (`${window.location.pathname}${window.location.search}${window.location.hash}` !== nextUrl) {
+      window.history.replaceState({}, "", nextUrl);
+    }
+  }, [view, page]);
 
   const readContract = useMemo(() => {
     if (!CONTRACT_ADDRESS) return null;
