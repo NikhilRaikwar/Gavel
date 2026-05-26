@@ -1,4 +1,5 @@
 export const DISPUTE_ESCROW_ABI = [
+  "function disputeCount() view returns (uint256)",
   "function createDispute(address defendant,string description) payable returns (uint256)",
   "function joinDispute(uint256 id) payable",
   "function submitEvidence(uint256 id,string evidenceUrl)",

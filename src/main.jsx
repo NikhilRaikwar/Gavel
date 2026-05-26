@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import { ethers } from "ethers";
 import "@rainbow-me/rainbowkit/styles.css";
@@ -9,6 +9,7 @@ import { injected } from "wagmi/connectors";
 import { defineChain } from "viem";
 import { DISPUTE_ESCROW_ABI } from "./abi/disputeEscrowAbi";
 import "./styles.css";
+import { Analytics } from "@vercel/analytics/react";
 
 const SOMNIA_CHAIN_ID = 50312;
 const SOMNIA_RPC_URL = "https://api.infra.testnet.somnia.network";
@@ -83,6 +84,76 @@ function getSeoContent(view, page, activeDispute) {
   };
 }
 
+function disputeStateLabel(state) {
+  return [
+    "Open",
+    "Evidence pending",
+    "Evidence ready",
+    "Arbitrating",
+    "Appeal window",
+    "Resolved",
+    "Escalated to DAO",
+    "Expired",
+    "Agent failed"
+  ][Number(state)] || "Unknown";
+}
+
+function isPartyInDispute(dispute, wallet) {
+  if (!dispute || !wallet) return false;
+  const target = wallet.toLowerCase();
+  return dispute.plaintiff?.toLowerCase?.() === target || dispute.defendant?.toLowerCase?.() === target;
+}
+
+function normalizeDispute(dispute, id, wallet) {
+  if (!dispute) return null;
+  const lowerWallet = wallet?.toLowerCase?.() || "";
+  const role =
+    dispute.plaintiff?.toLowerCase?.() === lowerWallet
+      ? "Plaintiff"
+      : dispute.defendant?.toLowerCase?.() === lowerWallet
+        ? "Defendant"
+        : "Observer";
+
+  const latestRequestId = dispute.latestRequestId?.toString?.() || "";
+  const winner = dispute.winner && dispute.winner !== ethers.ZeroAddress ? dispute.winner : "";
+
+  return {
+    id: id.toString(),
+    description: dispute.description || "",
+    plaintiff: dispute.plaintiff,
+    defendant: dispute.defendant,
+    plaintiffDeposit: dispute.plaintiffDeposit?.toString?.() || "0",
+    defendantDeposit: dispute.defendantDeposit?.toString?.() || "0",
+    heldAmount: dispute.heldAmount?.toString?.() || "0",
+    agentBudget: dispute.agentBudget?.toString?.() || "0",
+    appealDeadline: dispute.appealDeadline?.toString?.() || "0",
+    createdAt: dispute.createdAt?.toString?.() || "0",
+    state: dispute.state,
+    stateLabel: disputeStateLabel(dispute.state),
+    winner,
+    confidence: Number(dispute.confidence || 0),
+    plaintiffEvidenceUrl: dispute.plaintiffEvidenceUrl || "",
+    defendantEvidenceUrl: dispute.defendantEvidenceUrl || "",
+    plaintiffSummary: dispute.plaintiffSummary || "",
+    defendantSummary: dispute.defendantSummary || "",
+    verdictJson: dispute.verdictJson || "",
+    verdictReasoning: dispute.verdictReasoning || "",
+    latestRequestId,
+    role
+  };
+}
+
+function caseActionForDispute(dispute) {
+  if (!dispute) return { label: "View case", page: "overview" };
+  if (dispute.latestRequestId) {
+    if (Number(dispute.state) >= 5) return { label: "View receipt", page: "receipt" };
+    if (Number(dispute.state) >= 3) return { label: "Open hearing", page: "arbitration" };
+    return { label: "View verdict", page: "verdict" };
+  }
+  if (Number(dispute.state) <= 1) return { label: "Add evidence", page: "evidence" };
+  return { label: "Continue case", page: "evidence" };
+}
+
 function setMetaContent(selector, attribute, value) {
   let element = document.head.querySelector(selector);
   if (!element) {
@@ -131,39 +202,13 @@ const rainbowConfig = walletConnectProjectId
 
 const queryClient = new QueryClient();
 
-const demoEvents = [
-  {
-    agent: "RESEARCH",
-    step: "Parsed plaintiff evidence URL",
-    data: "github.com/audit-co/report - Found 3 claims: audit completed, final report delivered, timestamped commit history.",
-    time: "42s ago",
-    status: "done",
-    sample: true
-  },
-  {
-    agent: "RESEARCH",
-    step: "Parsed defendant evidence URL",
-    data: "notion.so/audit-contract - Found milestone spec and missing remediation guide requirement.",
-    time: "38s ago",
-    status: "done",
-    sample: true
-  },
-  {
-    agent: "JUDGE",
-    step: "Deliberating final verdict...",
-    data: "Synthesising parsed evidence. This is demo fallback data until a live contract event arrives.",
-    time: "Now",
-    status: "active",
-    sample: true
-  }
-];
-
 function Root() {
   return (
     <WagmiProvider config={rainbowConfig}>
       <QueryClientProvider client={queryClient}>
         <RainbowKitProvider>
           <App />
+          <Analytics />
         </RainbowKitProvider>
       </QueryClientProvider>
     </WagmiProvider>
@@ -182,8 +227,22 @@ function App() {
   const [busy, setBusy] = useState(false);
   const [disputeId, setDisputeId] = useState("");
   const [activeDispute, setActiveDispute] = useState(null);
-  const [events, setEvents] = useState(demoEvents);
+  const [caseList, setCaseList] = useState([]);
+  const [caseEvents, setCaseEvents] = useState({});
+  const [loadingCases, setLoadingCases] = useState(false);
   const [receipt, setReceipt] = useState(null);
+  const previousAddressRef = useRef("");
+
+  const readContract = useMemo(() => {
+    if (!CONTRACT_ADDRESS) return null;
+    return new ethers.Contract(CONTRACT_ADDRESS, DISPUTE_ESCROW_ABI, new ethers.JsonRpcProvider(SOMNIA_RPC_URL));
+  }, []);
+
+  const writeContract = useMemo(() => {
+    if (!CONTRACT_ADDRESS || !walletClient) return null;
+    const provider = new ethers.BrowserProvider(walletClient.transport);
+    return provider.getSigner().then((signer) => new ethers.Contract(CONTRACT_ADDRESS, DISPUTE_ESCROW_ABI, signer));
+  }, [walletClient]);
 
   useEffect(() => {
     const canEnterDashboard = isConnected && chainId === SOMNIA_CHAIN_ID;
@@ -195,13 +254,32 @@ function App() {
       setBusy(false);
       setDisputeId("");
       setActiveDispute(null);
-      setEvents(demoEvents);
+      setCaseList([]);
+      setCaseEvents({});
+      setLoadingCases(false);
       setReceipt(null);
       return;
     }
 
     setView("app");
   }, [isConnected, chainId]);
+
+  useEffect(() => {
+    if (!isConnected || chainId !== SOMNIA_CHAIN_ID) return;
+    if (previousAddressRef.current && previousAddressRef.current !== address) {
+      setCaseList([]);
+      setCaseEvents({});
+      setActiveDispute(null);
+      setDisputeId("");
+      setReceipt(null);
+    }
+    previousAddressRef.current = address || "";
+  }, [address, isConnected, chainId]);
+
+  useEffect(() => {
+    if (!isConnected || chainId !== SOMNIA_CHAIN_ID || !readContract || !address) return;
+    loadMyCases(disputeId);
+  }, [address, isConnected, chainId, readContract]);
 
   useEffect(() => {
     if (typeof window === "undefined") return;
@@ -247,59 +325,57 @@ function App() {
     }
   }, [view, page]);
 
-  const readContract = useMemo(() => {
-    if (!CONTRACT_ADDRESS) return null;
-    return new ethers.Contract(CONTRACT_ADDRESS, DISPUTE_ESCROW_ABI, new ethers.JsonRpcProvider(SOMNIA_RPC_URL));
-  }, []);
-
-  const writeContract = useMemo(() => {
-    if (!CONTRACT_ADDRESS || !walletClient) return null;
-    const provider = new ethers.BrowserProvider(walletClient.transport);
-    return provider.getSigner().then((signer) => new ethers.Contract(CONTRACT_ADDRESS, DISPUTE_ESCROW_ABI, signer));
-  }, [walletClient]);
-
   useEffect(() => {
     if (!readContract) return undefined;
 
     const onRequest = (id, requestId, stage) => {
-      if (disputeId && id.toString() !== disputeId) return;
-      setEvents((current) => [
-        ...current.filter((item) => !item.sample),
-        {
-          agent: stageName(Number(stage)).toUpperCase(),
-          step: `Somnia request #${requestId.toString()} created`,
-          data: "Waiting for validator consensus and callback.",
-          time: new Date().toLocaleTimeString(),
-          requestId: requestId.toString(),
-          status: "active"
-        }
-      ]);
+      const key = id.toString();
+      setCaseEvents((current) => ({
+        ...current,
+        [key]: [
+          ...(current[key] || []),
+          {
+            agent: stageName(Number(stage)).toUpperCase(),
+            step: `Somnia request #${requestId.toString()} created`,
+            data: "Waiting for validator consensus and callback.",
+            time: new Date().toLocaleTimeString(),
+            requestId: requestId.toString(),
+            status: "active"
+          }
+        ]
+      }));
     };
     const onStep = (id, stage, step, data) => {
-      if (disputeId && id.toString() !== disputeId) return;
-      setEvents((current) => [
-        ...current.filter((item) => !item.sample),
-        {
-          agent: stageName(Number(stage)).toUpperCase(),
-          step,
-          data,
-          time: new Date().toLocaleTimeString(),
-          status: "done"
-        }
-      ]);
+      const key = id.toString();
+      setCaseEvents((current) => ({
+        ...current,
+        [key]: [
+          ...(current[key] || []),
+          {
+            agent: stageName(Number(stage)).toUpperCase(),
+            step,
+            data,
+            time: new Date().toLocaleTimeString(),
+            status: "done"
+          }
+        ]
+      }));
     };
     const onVerdict = (id, winner, confidence, reasoning, verdictJson) => {
-      if (disputeId && id.toString() !== disputeId) return;
-      setEvents((current) => [
-        ...current.filter((item) => !item.sample),
-        {
-          agent: "JUDGE",
-          step: `Verdict delivered to ${shortAddress(winner)}`,
-          data: `${confidence}% confidence - ${reasoning || verdictJson}`,
-          time: new Date().toLocaleTimeString(),
-          status: "done"
-        }
-      ]);
+      const key = id.toString();
+      setCaseEvents((current) => ({
+        ...current,
+        [key]: [
+          ...(current[key] || []),
+          {
+            agent: "JUDGE",
+            step: `Verdict delivered to ${shortAddress(winner)}`,
+            data: `${confidence}% confidence - ${reasoning || verdictJson}`,
+            time: new Date().toLocaleTimeString(),
+            status: "done"
+          }
+        ]
+      }));
       loadDispute(id.toString());
     };
 
@@ -311,7 +387,7 @@ function App() {
       readContract.off("AgentStep", onStep);
       readContract.off("VerdictDelivered", onVerdict);
     };
-  }, [readContract, disputeId]);
+  }, [readContract]);
 
   async function ensureSomnia() {
     if (!isConnected) {
@@ -331,6 +407,51 @@ function App() {
       return null;
     }
     return writeContract;
+  }
+
+  async function loadMyCases(preferredId = "") {
+    if (!readContract || !address) return [];
+    setLoadingCases(true);
+    try {
+      const total = Number(await readContract.disputeCount());
+      const disputes = await Promise.all(
+        Array.from({ length: total }, async (_, index) => {
+          const dispute = await readContract.getDispute(index);
+          return isPartyInDispute(dispute, address) ? normalizeDispute(dispute, index, address) : null;
+        })
+      );
+      const owned = disputes.filter(Boolean).sort((a, b) => Number(b.id) - Number(a.id));
+      setCaseList(owned);
+
+      const nextId = preferredId || disputeId || owned[0]?.id || "";
+      if (nextId && owned.some((entry) => entry.id === nextId)) {
+        await loadDispute(nextId, owned);
+      } else if (owned[0]) {
+        await loadDispute(owned[0].id, owned);
+      } else {
+        setDisputeId("");
+        setActiveDispute(null);
+        setReceipt(null);
+        setCaseEvents({});
+      }
+
+      return owned;
+    } catch (error) {
+      setNotice(error.shortMessage || error.message);
+      return [];
+    } finally {
+      setLoadingCases(false);
+    }
+  }
+
+  async function loadSelectedCase(id) {
+    const target = id?.toString?.() || "";
+    if (!target) return;
+    if (caseList.length > 0 && !caseList.some((entry) => entry.id === target)) {
+      setNotice("That case is not associated with your connected wallet.");
+      return;
+    }
+    await loadDispute(target);
   }
 
   async function createDispute(event) {
@@ -355,7 +476,7 @@ function App() {
       setNotice(`Case #${nextId} created. Defendant can now join with matching stake.`);
       setPage("evidence");
       setView("app");
-      if (nextId) await loadDispute(nextId);
+      if (nextId) await loadMyCases(nextId);
     } catch (error) {
       setNotice(error.shortMessage || error.message);
     } finally {
@@ -380,7 +501,7 @@ function App() {
       const tx = await contract.submitEvidence(disputeId, input.value);
       await tx.wait();
       setNotice("Evidence submitted on-chain.");
-      await loadDispute(disputeId);
+      await loadMyCases(disputeId);
     } catch (error) {
       setNotice(error.shortMessage || error.message);
     } finally {
@@ -402,7 +523,7 @@ function App() {
       await tx.wait();
       setNotice("Somnia agent pipeline started.");
       setPage("arbitration");
-      await loadDispute(disputeId);
+      await loadMyCases(disputeId);
     } catch (error) {
       setNotice(error.shortMessage || error.message);
     } finally {
@@ -410,15 +531,29 @@ function App() {
     }
   }
 
-  async function loadDispute(id = disputeId) {
+  async function loadDispute(id = disputeId, ownedCases = caseList) {
     if (!readContract || id === "") {
       setNotice("Set a deployed contract address and dispute ID first.");
       return;
     }
     try {
       const dispute = await readContract.getDispute(id);
-      setActiveDispute(dispute);
-      setDisputeId(id);
+      const normalized = normalizeDispute(dispute, id, address);
+      if (address && !isPartyInDispute(dispute, address)) {
+        setActiveDispute(null);
+        setReceipt(null);
+        setNotice("This case is not part of the connected wallet.");
+        return;
+      }
+      if (ownedCases.length > 0 && !ownedCases.some((entry) => entry.id === normalized.id)) {
+        setActiveDispute(null);
+        setReceipt(null);
+        setNotice("This case is not part of the connected wallet.");
+        return;
+      }
+      setActiveDispute(normalized);
+      setDisputeId(normalized.id);
+      setReceipt(null);
     } catch (error) {
       setNotice(error.shortMessage || error.message);
     }
@@ -427,7 +562,7 @@ function App() {
   async function loadReceipt(requestId) {
     const target = requestId || activeDispute?.latestRequestId?.toString?.();
     if (!target) {
-      setNotice("No Somnia request ID available yet.");
+      setNotice("This case has not started arbitration yet, so no Somnia request ID exists.");
       return;
     }
     try {
@@ -440,9 +575,40 @@ function App() {
     }
   }
 
+  async function shareVerdict() {
+    if (!activeDispute?.verdictJson) {
+      setNotice("No verdict is available to share for this case yet.");
+      return;
+    }
+
+    const shareText = [
+      `Gavel verdict for case #${disputeId}`,
+      `Winner: ${activeDispute.winner || "pending"}`,
+      `Confidence: ${activeDispute.confidence || 0}%`,
+      `Reasoning: ${activeDispute.verdictReasoning || "pending"}`,
+      `Receipt request ID: ${activeDispute.latestRequestId || "pending"}`
+    ].join("\n");
+
+    try {
+      if (navigator.share) {
+        await navigator.share({
+          title: `Gavel verdict for case #${disputeId}`,
+          text: shareText
+        });
+      } else {
+        await navigator.clipboard.writeText(shareText);
+        setNotice("Verdict copied to clipboard.");
+      }
+    } catch (error) {
+      setNotice(error.message || "Unable to share verdict.");
+    }
+  }
+
   if (view === "landing") {
     return <Landing onOpenApp={() => setView("app")} />;
   }
+
+  const selectedCaseEvents = disputeId ? caseEvents[disputeId] || [] : [];
 
   return (
     <DashboardShell
@@ -450,18 +616,23 @@ function App() {
       setPage={setPage}
       notice={notice}
       busy={busy}
+      loadingCases={loadingCases}
       address={address}
       chainId={chainId}
+      caseList={caseList}
       activeDispute={activeDispute}
       disputeId={disputeId}
       setDisputeId={setDisputeId}
-      events={events}
+      events={selectedCaseEvents}
       receipt={receipt}
       createDispute={createDispute}
       loadDispute={loadDispute}
+      loadMyCases={loadMyCases}
+      loadSelectedCase={loadSelectedCase}
       submitEvidence={submitEvidence}
       requestArbitration={requestArbitration}
       loadReceipt={loadReceipt}
+      shareVerdict={shareVerdict}
     />
   );
 }
@@ -471,9 +642,7 @@ function Landing({ onOpenApp }) {
     <div className="landing-page">
       <nav className="landing-nav">
         <button className="nav-logo" type="button">
-          <div className="gavel-icon">
-            <svg viewBox="0 0 24 24"><path d="M9 3L5 7l10 10 4-4L9 3zM3 21l6-6M15 3l6 6" /></svg>
-          </div>
+          <img src="/favicon.svg" alt="Gavel Logo" className="logo-img" />
           Gavel
         </button>
         <ul className="nav-links">
@@ -512,27 +681,26 @@ function Landing({ onOpenApp }) {
             <a href="#how" className="btn-secondary">See how it works <span>⌄</span></a>
           </div>
           <div className="hero-stats">
-            <div className="stat-item"><span className="stat-num">0</span><span className="stat-label">Human arbiters</span></div>
-            <div className="stat-item"><span className="stat-num">4</span><span className="stat-label">AI agents in jury</span></div>
-            <div className="stat-item"><span className="stat-num">&lt;60s</span><span className="stat-label">Avg. verdict time</span></div>
+            <div className="stat-item"><span className="stat-num">1</span><span className="stat-label">Escrow contract</span></div>
+            <div className="stat-item"><span className="stat-num">3</span><span className="stat-label">Live Somnia agents</span></div>
+            <div className="stat-item"><span className="stat-num">100%</span><span className="stat-label">On-chain receipts</span></div>
           </div>
           <div className="hero-visual">
             <div className="verdict-card">
               <div className="vc-header">
                 <div className="vc-gavel">⚖</div>
-                <div><div className="vc-title">CASE #0042</div><div className="vc-id">Freelance delivery dispute</div></div>
+                <div><div className="vc-title">Live dispute pipeline</div><div className="vc-id">Connect your wallet to load your cases</div></div>
               </div>
               <div className="vc-steps">
-                <VerdictStep name="Research Agent" sub="Parsed 2 evidence URLs" done />
-                <VerdictStep name="Validator Agent" sub="Cross-checked 3 claims" done />
-                <VerdictStep name="Skeptic Agent" sub="Found no contradictions" done />
-                <VerdictStep name="Judge Agent" sub="Deliberating..." active />
+                <VerdictStep name="Research Agent" sub="Extracts factual claims from public evidence" done />
+                <VerdictStep name="Validator Agent" sub="Checks claims for consistency" done />
+                <VerdictStep name="Judge Agent" sub="Returns the final verdict JSON" active />
               </div>
               <div className="vc-verdict">
                 <div className="vc-verdict-label">Verdict</div>
-                <div className="vc-verdict-winner">Plaintiff wins</div>
-                <div className="vc-verdict-reason">GitHub history confirms delivery 3 days before deadline. Funds released.</div>
-                <div className="vc-verdict-conf"><div className="conf-bar"><div className="conf-fill" /></div><span className="conf-label">87% confidence</span></div>
+                <div className="vc-verdict-winner">No case selected</div>
+                <div className="vc-verdict-reason">Connect a wallet, open one of your disputes, and the live verdict and receipt panels will populate from Somnia.</div>
+                <div className="vc-verdict-conf"><div className="conf-bar"><div className="conf-fill" /></div><span className="conf-label">Awaiting request</span></div>
               </div>
             </div>
           </div>
@@ -614,12 +782,31 @@ function Landing({ onOpenApp }) {
 }
 
 function DashboardShell(props) {
-  const { page, setPage, notice, address, chainId } = props;
+  const { page, setPage, notice, address, chainId, activeDispute, disputeId, caseList, loadingCases } = props;
+  const pageTitle =
+    page === "overview"
+      ? "Dashboard"
+      : page === "cases"
+        ? "My Cases"
+        : page === "create"
+          ? "New Case"
+          : page === "evidence"
+            ? activeDispute ? `Evidence - Case #${disputeId}` : "Submit Evidence"
+            : page === "arbitration"
+              ? activeDispute ? `Live Hearing - Case #${disputeId}` : "Live Hearing"
+              : page === "verdict"
+                ? activeDispute ? `Verdict - Case #${disputeId}` : "Verdict"
+                : activeDispute ? `Audit Receipt - Case #${disputeId}` : "Audit Receipt";
   return (
     <div className="dashboard-body">
       <div className="sidebar-overlay" />
       <aside className="sidebar" id="sidebar">
-        <div className="sidebar-logo"><div className="logo-text"><span className="logo-dot" /> Gavel</div></div>
+        <div className="sidebar-logo">
+          <div className="logo-text">
+            <img src="/favicon.svg" alt="Gavel Logo" className="logo-img" />
+            Gavel
+          </div>
+        </div>
         <nav className="sidebar-nav">
           <div className="nav-section-label">Overview</div>
           <NavItem active={page === "overview"} icon="⊞" label="Dashboard" onClick={() => setPage("overview")} />
@@ -640,7 +827,7 @@ function DashboardShell(props) {
 
       <main className="main">
         <div className="topbar">
-          <div className="topbar-title">{pageTitles[page]}</div>
+          <div className="topbar-title">{pageTitle}</div>
           <div className="topbar-actions">
             <ConnectButton.Custom>
               {({ account, chain, openAccountModal, openChainModal, openConnectModal, mounted }) => {
@@ -656,10 +843,10 @@ function DashboardShell(props) {
         </div>
 
         {notice && <div className="app-notice">{notice}</div>}
-        {!CONTRACT_ADDRESS && <div className="app-notice warn">Set VITE_DISPUTE_ESCROW_ADDRESS after deploy. Demo data is labeled where used.</div>}
+        {!CONTRACT_ADDRESS && <div className="app-notice warn">Set VITE_DISPUTE_ESCROW_ADDRESS after deploy.</div>}
 
-        {page === "overview" && <Overview setPage={setPage} />}
-        {page === "cases" && <Cases setPage={setPage} />}
+        {page === "overview" && <Overview setPage={setPage} caseList={caseList} loadingCases={loadingCases} loadSelectedCase={props.loadSelectedCase} loadReceipt={props.loadReceipt} />}
+        {page === "cases" && <Cases setPage={setPage} caseList={caseList} loadingCases={loadingCases} loadSelectedCase={props.loadSelectedCase} loadReceipt={props.loadReceipt} />}
         {page === "create" && <Create {...props} />}
         {page === "evidence" && <Evidence {...props} />}
         {page === "arbitration" && <LiveHearing {...props} />}
@@ -670,41 +857,62 @@ function DashboardShell(props) {
   );
 }
 
-function Overview({ setPage }) {
+function Overview({ setPage, caseList, loadingCases, loadSelectedCase, loadReceipt }) {
+  const totalCases = caseList.length;
+  const activeCases = caseList.filter((entry) => Number(entry.state) >= 0 && Number(entry.state) <= 3).length;
+  const resolvedCases = caseList.filter((entry) => Number(entry.state) >= 5).length;
+  const lockedStake = caseList.reduce((sum, entry) => sum + Number(entry.plaintiffDeposit || 0) + Number(entry.defendantDeposit || 0), 0);
   return (
     <div className="page active">
       <div className="stats-row">
-        <StatCard label="Total cases" value="12" sub="↑ 3 this week" positive />
-        <StatCard label="Active disputes" value="4" sub="2 awaiting evidence" amber />
-        <StatCard label="Funds in escrow" value="24.6" sub="STT locked" />
-        <StatCard label="Verdicts issued" value="8" sub="100% auto-executed" positive />
+        <StatCard label="Total cases" value={String(totalCases)} sub={loadingCases ? "Loading on-chain cases..." : "Connected wallet cases"} positive />
+        <StatCard label="Active disputes" value={String(activeCases)} sub="Awaiting evidence or arbitration" amber />
+        <StatCard label="Funds in escrow" value={lockedStake ? lockedStake.toFixed(2) : "0.00"} sub="STT locked" />
+        <StatCard label="Verdicts issued" value={String(resolvedCases)} sub="On-chain outcomes" positive />
       </div>
       <div className="card">
         <div className="card-header"><div><div className="card-title">Recent cases</div><div className="card-subtitle">Your disputes and arbitrations</div></div><button className="btn btn-outline" onClick={() => setPage("cases")}>View all</button></div>
-        <CaseTable setPage={setPage} compact />
+        <CaseTable setPage={setPage} caseList={caseList} loadSelectedCase={loadSelectedCase} loadReceipt={loadReceipt} compact />
       </div>
       <div className="overview-grid">
         <div className="card metric-card">
           <div className="card-title">Agent performance</div>
-          {["Research Agent", "Validator Agent", "Skeptic Agent", "Judge Agent"].map((agent, index) => <ProgressRow key={agent} label={agent} value={[98, 95, 97, 100][index]} />)}
+          {["Research Agent", "Judge Agent"].map((agent, index) => <ProgressRow key={agent} label={agent} value={[98, 100][index]} />)}
         </div>
         <div className="card metric-card">
           <div className="card-title">Verdict distribution</div>
-          <Distribution color="var(--green)" label="Plaintiff wins" value="5 cases (62%)" />
-          <Distribution color="var(--accent)" label="Defendant wins" value="2 cases (25%)" />
-          <Distribution color="var(--ink-muted)" label="Split decision" value="1 case (13%)" />
-          <div className="metric-footer">Avg. confidence: <strong>84.3%</strong></div>
+          <Distribution color="var(--green)" label="Resolved cases" value={`${resolvedCases} case(s)`} />
+          <Distribution color="var(--accent)" label="In progress" value={`${activeCases} case(s)`} />
+          <Distribution color="var(--ink-muted)" label="Wallet visible" value={`${totalCases} case(s)`} />
+          <div className="metric-footer">Filtered to the connected wallet only.</div>
         </div>
       </div>
     </div>
   );
 }
 
-function Cases({ setPage }) {
+function Cases({ setPage, caseList, loadingCases, loadSelectedCase, loadReceipt }) {
   return (
     <div className="page active">
-      <div className="filters"><input placeholder="Search cases..." /><select><option>All statuses</option><option>Resolved</option><option>Arbitrating</option></select><button className="btn btn-accent" onClick={() => setPage("create")}>+ New case</button></div>
-      <div className="card"><CaseTable setPage={setPage} /></div>
+      <div className="filters">
+        <input placeholder="Search your cases..." />
+        <select>
+          <option>All statuses</option>
+          <option>Resolved</option>
+          <option>Arbitrating</option>
+          <option>Evidence pending</option>
+        </select>
+        <button className="btn btn-accent" onClick={() => setPage("create")}>+ New case</button>
+      </div>
+      <div className="card">
+        <div className="card-header">
+          <div>
+            <div className="card-title">Your on-chain disputes</div>
+            <div className="card-subtitle">{loadingCases ? "Loading disputes from Somnia..." : "Only disputes where your connected wallet is plaintiff or defendant appear here."}</div>
+          </div>
+        </div>
+        <CaseTable setPage={setPage} caseList={caseList} loadSelectedCase={loadSelectedCase} loadReceipt={loadReceipt} />
+      </div>
     </div>
   );
 }
@@ -737,86 +945,199 @@ function Create({ createDispute, busy }) {
   );
 }
 
-function Evidence({ disputeId, setDisputeId, activeDispute, loadDispute, submitEvidence, requestArbitration, busy }) {
+function Evidence({ disputeId, setDisputeId, activeDispute, caseList, loadSelectedCase, submitEvidence, requestArbitration, busy, loadingCases }) {
+  const currentCase = activeDispute || caseList.find((entry) => entry.id === disputeId) || null;
+  const canArbitrate = currentCase && currentCase.plaintiffEvidenceUrl && currentCase.defendantEvidenceUrl;
+
   return (
     <div className="page active">
-      <div className="case-loader"><input value={disputeId} onChange={(event) => setDisputeId(event.target.value)} placeholder="Load dispute ID" /><button className="btn btn-outline" onClick={() => loadDispute()}>Load</button><input data-agent-budget type="number" min="0.90" step="0.01" defaultValue="0.90" /><span>Agent budget STT</span></div>
-      <div className="pending-banner">⏳ Case #{disputeId || "0040"} - Waiting for both parties to submit evidence before arbitration can begin.</div>
-      <div className="evidence-layout">
-        <EvidenceParty title="Plaintiff (you)" address={activeDispute?.plaintiff || "0x3f4a...8b2c"} url={activeDispute?.plaintiffEvidenceUrl || "https://github.com/alex/nft-project/commit/a3f9..."} side="plaintiff" onSubmit={submitEvidence} busy={busy} />
-        <EvidenceParty title="Defendant" address={activeDispute?.defendant || "0x8b1d...2e99"} url={activeDispute?.defendantEvidenceUrl || ""} side="defendant" onSubmit={submitEvidence} busy={busy} />
+      <div className="case-loader">
+        <select value={disputeId} onChange={(event) => loadSelectedCase(event.target.value)}>
+          <option value="">Select your case</option>
+          {caseList.map((entry) => (
+            <option value={entry.id} key={entry.id}>Case #{entry.id} · {entry.stateLabel}</option>
+          ))}
+        </select>
+        <button className="btn btn-outline" onClick={() => loadSelectedCase(disputeId)} disabled={!disputeId || loadingCases}>Load</button>
+        <input data-agent-budget type="number" min="0.90" step="0.01" defaultValue="0.90" />
+        <span>Agent budget STT</span>
       </div>
-      <div className="card timeline-card"><div className="card-header"><div className="card-title">Evidence timeline</div></div><ReceiptTimeline demo /></div>
-      <div className="right-actions"><button className="btn btn-dark" onClick={requestArbitration} disabled={busy}>Request arbitration →</button></div>
+
+      {!currentCase ? (
+        <div className="card">
+          <div className="card-pad">
+            <div className="empty-state">Select one of your on-chain disputes to view evidence, hearing, verdict, and receipt.</div>
+          </div>
+        </div>
+      ) : (
+        <>
+          <div className="pending-banner">Case #{currentCase.id} · {currentCase.stateLabel}</div>
+          <div className="evidence-layout">
+            <EvidenceParty title="Plaintiff" address={currentCase.plaintiff} url={currentCase.plaintiffEvidenceUrl} side="plaintiff" onSubmit={submitEvidence} busy={busy} />
+            <EvidenceParty title="Defendant" address={currentCase.defendant} url={currentCase.defendantEvidenceUrl} side="defendant" onSubmit={submitEvidence} busy={busy} />
+          </div>
+          <div className="card timeline-card">
+            <div className="card-header"><div className="card-title">Evidence timeline</div></div>
+            <ReceiptTimeline receipt={null} />
+          </div>
+          <div className="right-actions">
+            <button className="btn btn-dark" onClick={requestArbitration} disabled={busy || !canArbitrate}>Request arbitration →</button>
+          </div>
+        </>
+      )}
     </div>
   );
 }
 
-function LiveHearing({ events, activeDispute, loadReceipt }) {
+function LiveHearing({ events, activeDispute, disputeId, loadReceipt }) {
+  const hasRequest = Boolean(activeDispute?.latestRequestId);
   return (
     <div className="page active">
-      <div className="hearing-banner"><div className="feed-status-dot dot-amber" /><span>Case #{activeDispute?.latestRequestId ? "live" : "0041"} - Agents are deliberating</span><span>Est. 30s remaining</span></div>
+      <div className="hearing-banner">
+        <div className="feed-status-dot dot-amber" />
+        <span>Case #{disputeId || "—"} - {hasRequest ? `Somnia request #${activeDispute.latestRequestId}` : "Waiting for arbitration to start"}</span>
+        <span>{hasRequest ? "Live hearing" : "No request yet"}</span>
+      </div>
       <div className="card">
-        <div className="card-header"><div className="card-title">Agent reasoning feed</div><div className="card-subtitle">Live · Signed by validators</div></div>
-        <div className="card-pad"><div className="agent-feed">{events.map((event, index) => <FeedItem key={`${event.step}-${index}`} event={event} />)}</div></div>
+        <div className="card-header"><div className="card-title">Agent reasoning feed</div><div className="card-subtitle">On-chain updates for this case only</div></div>
+        <div className="card-pad">
+          <div className="agent-feed">
+            {events.length > 0 ? events.map((event, index) => <FeedItem key={`${event.step}-${index}`} event={event} />) : <div className="empty-state">No agent events yet for this case.</div>}
+          </div>
+        </div>
       </div>
-      <div className="hearing-stats"><StatMini label="Escrow locked" value="10.0 STT" sub="Auto-releases on verdict" /><StatMini label="Agents complete" value={`${Math.min(events.length, 3)} / 4`} sub="Judge deliberating" /><StatMini label="Consensus nodes" value="7 / 9" sub="Majority reached" /></div>
-      <div className="right-actions"><button className="btn btn-outline" onClick={() => loadReceipt()}>Open latest receipt</button></div>
+      <div className="hearing-stats">
+        <StatMini label="Escrow locked" value={activeDispute ? `${Number(activeDispute.plaintiffDeposit || 0) + Number(activeDispute.defendantDeposit || 0)} STT` : "0 STT"} sub="Auto-releases on verdict" />
+        <StatMini label="Latest request" value={activeDispute?.latestRequestId || "—"} sub={activeDispute?.latestRequestId ? "Available on Somnia" : "No request yet"} />
+        <StatMini label="Status" value={activeDispute?.stateLabel || "No case"} sub="Selected wallet case" />
+      </div>
+      <div className="right-actions"><button className="btn btn-outline" onClick={() => loadReceipt()} disabled={!hasRequest}>Open latest receipt</button></div>
     </div>
   );
 }
 
-function Verdict({ activeDispute, loadReceipt }) {
-  const confidence = Number(activeDispute?.confidence || 87);
-  const winner = activeDispute?.winner && activeDispute.winner !== ethers.ZeroAddress ? shortAddress(activeDispute.winner) : "Plaintiff";
-  const reasoning = activeDispute?.verdictReasoning || "GitHub commit history confirms full design delivery 3 days before the agreed deadline. No evidence of incompleteness was substantiated by the defendant.";
+function Verdict({ activeDispute, disputeId, loadReceipt, shareVerdict }) {
+  const confidence = Number(activeDispute?.confidence || 0);
+  const winner = activeDispute?.winner ? shortAddress(activeDispute.winner) : "Awaiting verdict";
+  const reasoning = activeDispute?.verdictReasoning || "No verdict has been delivered for this case yet.";
+  const verdictReady = Boolean(activeDispute?.verdictJson);
   return (
     <div className="page active">
       <div className="verdict-box">
-        <div className="verdict-label">Case #{activeDispute ? "live" : "0042"} · Final verdict</div>
-        <div className="verdict-winner">⚖ {winner} wins</div>
+        <div className="verdict-label">Case #{disputeId || "—"} · Final verdict</div>
+        <div className="verdict-winner">⚖ {winner}</div>
         <div className="verdict-conf-row"><div className="verdict-conf-bar"><div className="verdict-conf-fill" style={{ width: `${confidence}%` }} /></div><span>{confidence}% confidence</span></div>
-        <div className="verdict-reason">"{reasoning}"</div>
+        <div className="verdict-reason">{verdictReady ? `"${reasoning}"` : "No verdict has been recorded for this case yet."}</div>
       </div>
-      <div className="verdict-meta-row"><Meta label="Winner receives" value={confidence >= 90 ? "Full escrow" : confidence >= 60 ? "80% now" : "DAO review"} green /><Meta label="Verdict issued" value="48s" /><Meta label="Auto-executed" value="✓ Yes" green /></div>
-      <div className="card tx-card"><div className="card-header"><div className="card-title">Transaction confirmed</div></div><div className="card-pad"><TxRow label="Tx hash" value="0xa3f9b2c8d1e4...7f22" /><TxRow label="Block" value="#4,827,441" /><TxRow label="Gas used" value="142,800" /><TxRow label="Rebate" value="+0.12 STT returned" green /></div></div>
-      <div className="form-actions"><button className="btn btn-dark" onClick={() => loadReceipt()}>View audit receipt →</button><button className="btn btn-outline">Share verdict</button></div>
+      <div className="verdict-meta-row">
+        <Meta label="Winner receives" value={!verdictReady ? "Waiting" : confidence >= 90 ? "Full escrow" : confidence >= 60 ? "80% now" : "DAO review"} green={verdictReady && confidence >= 90} />
+        <Meta label="Verdict issued" value={verdictReady ? "On-chain" : "Pending"} />
+        <Meta label="Auto-executed" value={verdictReady ? "✓ Yes" : "Pending"} green={verdictReady} />
+      </div>
+      <div className="card tx-card">
+        <div className="card-header"><div className="card-title">Transaction confirmed</div></div>
+        <div className="card-pad">
+          {verdictReady ? (
+            <>
+              <TxRow label="Latest request ID" value={activeDispute.latestRequestId} />
+              <TxRow label="State" value={activeDispute.stateLabel} />
+              <TxRow label="Agent budget" value={`${Number(activeDispute.agentBudget || 0) / 1e18} STT`} />
+              <TxRow label="Result" value={activeDispute.verdictJson} />
+            </>
+          ) : (
+            <div className="empty-state">This case is still waiting for arbitration, so there is no verdict receipt to show yet.</div>
+          )}
+        </div>
+      </div>
+      <div className="form-actions">
+        <button className="btn btn-dark" onClick={() => loadReceipt()} disabled={!activeDispute?.latestRequestId}>View audit receipt →</button>
+        <button className="btn btn-outline" onClick={shareVerdict} disabled={!verdictReady}>Share verdict</button>
+      </div>
     </div>
   );
 }
 
-function Receipt({ receipt }) {
+function Receipt({ receipt, activeDispute, disputeId }) {
+  const hasReceipt = Boolean(receipt);
+  async function exportReceipt() {
+    if (!receipt) return;
+    try {
+      await navigator.clipboard.writeText(JSON.stringify(receipt, null, 2));
+    } catch (error) {
+      console.error(error);
+    }
+  }
   return (
     <div className="page active">
-      <div className="receipt-top"><div><div className="muted">Case</div><div className="mono">#0042 - Freelance logo design</div></div><span className="badge badge-green"><span className="badge-dot" />Signed by validators</span><button className="btn btn-outline">Export JSON</button></div>
-      <div className="card"><div className="card-header"><div><div className="card-title">Execution receipt</div><div className="card-subtitle">{receipt ? "Fetched from Somnia receipt service" : "Demo fallback audit trail"}</div></div></div><ReceiptTimeline receipt={receipt} /></div>
+      <div className="receipt-top">
+        <div>
+          <div className="muted">Case</div>
+          <div className="mono">#{disputeId || "—"} {activeDispute ? `- ${activeDispute.description}` : ""}</div>
+        </div>
+        <span className="badge badge-green"><span className="badge-dot" />{hasReceipt ? "Fetched from Somnia receipts" : "Waiting for request ID"}</span>
+        <button className="btn btn-outline" onClick={exportReceipt} disabled={!hasReceipt}>Export JSON</button>
+      </div>
+      <div className="card">
+        <div className="card-header"><div><div className="card-title">Execution receipt</div><div className="card-subtitle">{hasReceipt ? "Fetched from Somnia receipt service" : "No receipt for this case yet"}</div></div></div>
+        <ReceiptTimeline receipt={receipt} />
+      </div>
       <div className="receipt-note">🔏 Receipt results are auditable; callback result controls escrow.</div>
     </div>
   );
 }
 
-function CaseTable({ setPage }) {
-  const rows = [
-    ["#0042", "Freelance logo design delivery", "Plaintiff", "2.0 STT", "Resolved", "View verdict", "verdict"],
-    ["#0041", "Smart contract audit milestone", "Defendant", "5.0 STT", "Arbitrating", "Live hearing", "arbitration"],
-    ["#0040", "NFT artwork commission", "Plaintiff", "1.5 STT", "Evidence pending", "Add evidence", "evidence"],
-    ["#0039", "DAO grant delivery dispute", "Plaintiff", "10.0 STT", "Resolved", "View receipt", "receipt"]
-  ];
+function CaseTable({ setPage, caseList, loadSelectedCase, loadReceipt, compact }) {
+  const rows = caseList.map((entry) => {
+    const action = caseActionForDispute(entry);
+    return { ...entry, action };
+  });
+
   return (
     <table>
-      <thead><tr><th>Case ID</th><th>Description</th><th>Role</th><th>Stake</th><th>Status</th><th>Action</th></tr></thead>
-      <tbody>{rows.map((row) => <tr key={row[0]} onClick={() => setPage(row[6])}><td className="mono">{row[0]}</td><td>{row[1]}</td><td><span className="badge badge-gray">{row[2]}</span></td><td className="mono">{row[3]}</td><td><StatusBadge status={row[4]} /></td><td><span className="action-link">{row[5]}</span></td></tr>)}</tbody>
+      <thead>
+        <tr>
+          <th>Case ID</th>
+          <th>Description</th>
+          <th>Role</th>
+          <th>Stake</th>
+          <th>Status</th>
+          <th>Action</th>
+        </tr>
+      </thead>
+      <tbody>
+        {rows.length > 0 ? rows.map((row) => (
+          <tr
+            key={row.id}
+            onClick={() => {
+              loadSelectedCase(row.id);
+              if (row.action.page === "receipt" && row.latestRequestId) {
+                loadReceipt(row.latestRequestId);
+                return;
+              }
+              setPage(row.action.page);
+            }}
+          >
+            <td className="mono">#{row.id}</td>
+            <td>{row.description || "No description"}</td>
+            <td><span className="badge badge-gray">{row.role}</span></td>
+            <td className="mono">{(Number(row.plaintiffDeposit || 0) + Number(row.defendantDeposit || 0)).toFixed(2)} STT</td>
+            <td><StatusBadge status={row.stateLabel} /></td>
+            <td><span className="action-link">{row.action.label}</span></td>
+          </tr>
+        )) : (
+          <tr><td colSpan="6"><div className="empty-state">No disputes are associated with this wallet yet.</div></td></tr>
+        )}
+      </tbody>
     </table>
   );
 }
 
 function ReceiptTimeline({ receipt }) {
-  const steps = receipt?.steps || [
-    ["Request received", "2026-05-27 14:02:31 UTC", "Agent pipeline triggered by contract. Deposit: 0.8 STT.", "requestId: 0xd8f2a1c9b3e744f28a..."],
-    ["Research Agent - plaintiff URL", "14:02:34 UTC", "LLM Parse Website extracted factual claims from plaintiff URL.", '{"claims":["Design delivered","All revisions included"],"credibility":94}'],
-    ["Research Agent - defendant URL", "14:02:37 UTC", "LLM Parse Website extracted original brief and compared deliverables.", '{"spec":"Logo + variants + source files","claims_matched":3}'],
-    ["Judge Agent - final verdict", "14:02:48 UTC", "LLM Inference synthesised all outputs. Deterministic verdict issued.", '{"winner":"plaintiff","confidence":87,"reasoning":"GitHub confirms delivery."}']
-  ];
+  if (!receipt) {
+    return <div className="receipt-timeline"><div className="empty-state">This case has no receipt yet. Start arbitration to generate a Somnia audit trail.</div></div>;
+  }
+
+  const steps = receipt.steps || receipt?.events || [];
   return <div className="receipt-timeline">{steps.map((step, index) => Array.isArray(step) ? <ReceiptStep key={step[0]} name={step[0]} time={step[1]} detail={step[2]} code={step[3]} /> : <ReceiptStep key={index} name={step.name} time={step.timestamp || ""} detail={step.body_preview || step.output || JSON.stringify(step)} code={JSON.stringify(step)} />)}</div>;
 }
 
@@ -852,15 +1173,5 @@ function safeParse(contract, log) {
 }
 function stageName(stage) { return ["None", "Research", "Research", "Judge"][stage] || "Agent"; }
 function shortAddress(value) { if (!value) return "0x..."; return `${value.slice(0, 6)}...${value.slice(-4)}`; }
-
-const pageTitles = {
-  overview: "Dashboard",
-  cases: "My Cases",
-  create: "New Case",
-  evidence: "Submit Evidence",
-  arbitration: "Live Hearing - Case #0041",
-  verdict: "Verdict - Case #0042",
-  receipt: "Audit Receipt - Case #0042"
-};
 
 createRoot(document.getElementById("root")).render(<Root />);

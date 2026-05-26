@@ -48,13 +48,12 @@ button { font-family: inherit; }
   background: transparent;
   cursor: pointer;
 }
-.nav-logo .gavel-icon {
-  width: 22px; height: 22px;
-  background: var(--accent);
-  border-radius: 4px;
-  display: flex; align-items: center; justify-content: center;
+.logo-img {
+  width: 24px;
+  height: 24px;
+  object-fit: contain;
+  border-radius: 5px;
 }
-.nav-logo .gavel-icon svg { width: 13px; height: 13px; fill: white; }
 .nav-links {
   display: flex; align-items: center; gap: 2rem;
   list-style: none;
