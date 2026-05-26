@@ -1,3 +1,0 @@
-V2 prompt placeholder.
-Cross-check factual claims against source availability and internal consistency.
-Return JSON with confirmedClaims, disputedClaims, and confidenceAdjustment.

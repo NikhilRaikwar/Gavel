@@ -116,6 +116,18 @@ flowchart LR
 - [AgentRegistry contract](https://shannon-explorer.somnia.network/address/0x08D1Fc808f1983d2Ea7B63a28ECD4d8C885Cd02A#code)
   - Registry layer for Somnia agents and explorer metadata
 
+## Prompt Library
+
+The live MVP uses inline prompt strings inside the Solidity contract, but the canonical human-readable prompt library lives here:
+
+- [Agent prompt library README](agents/prompt-library/README.md)
+- [Research prompt](agents/prompt-library/research.md)
+- [Validator prompt](agents/prompt-library/validator.md)
+- [Skeptic prompt](agents/prompt-library/skeptic.md)
+- [Judge prompt](agents/prompt-library/judge.md)
+
+This separation keeps the on-chain MVP deterministic while giving the team a clean place to evolve custom-agent prompts later.
+
 ## Architecture
 
 ```mermaid
@@ -210,6 +222,7 @@ SOMNIA_AGENTS_ADDRESS=0x037Bb9C718F3f7fe5eCBDB0b600D607b52706776
 PARSE_WEBSITE_AGENT_ID=12875401142070969085
 JUDGE_INFERENCE_AGENT_ID=12847293847561029384
 VITE_DISPUTE_ESCROW_ADDRESS=your_deployed_contract_address
+VITE_SITE_URL=https://gavel.example.com
 ```
 
 3. Start the frontend:
