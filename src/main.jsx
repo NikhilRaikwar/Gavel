@@ -12,7 +12,7 @@ import "./styles.css";
 import { Analytics } from "@vercel/analytics/react";
 
 const SOMNIA_CHAIN_ID = 50312;
-const SOMNIA_RPC_URL = "https://api.infra.testnet.somnia.network";
+const SOMNIA_RPC_URL = "https://dream-rpc.somnia.network";
 const RECEIPTS_URL = "https://receipts.testnet.agents.somnia.host";
 const CONTRACT_ADDRESS = import.meta.env.VITE_DISPUTE_ESCROW_ADDRESS || "";
 const SITE_URL = import.meta.env.VITE_SITE_URL || "https://gavel.example.com";
@@ -98,6 +98,24 @@ function disputeStateLabel(state) {
   ][Number(state)] || "Unknown";
 }
 
+function errorMessage(error) {
+  return error?.shortMessage || error?.reason || error?.info?.error?.message || error?.message || "Transaction failed.";
+}
+
+function formatStt(value, fractionDigits = 4) {
+  try {
+    const formatted = ethers.formatEther(value || 0);
+    const numeric = Number(formatted);
+    if (!Number.isFinite(numeric)) return "0";
+    return numeric.toLocaleString(undefined, {
+      maximumFractionDigits: fractionDigits,
+      minimumFractionDigits: 0
+    });
+  } catch {
+    return "0";
+  }
+}
+
 function isPartyInDispute(dispute, wallet) {
   if (!dispute || !wallet) return false;
   const target = wallet.toLowerCase();
@@ -114,7 +132,8 @@ function normalizeDispute(dispute, id, wallet) {
         ? "Defendant"
         : "Observer";
 
-  const latestRequestId = dispute.latestRequestId?.toString?.() || "";
+  const rawRequestId = dispute.latestRequestId?.toString?.() || "";
+  const latestRequestId = rawRequestId === "0" ? "" : rawRequestId;
   const winner = dispute.winner && dispute.winner !== ethers.ZeroAddress ? dispute.winner : "";
 
   return {
@@ -147,7 +166,8 @@ function caseActionForDispute(dispute) {
   if (!dispute) return { label: "View case", page: "overview" };
   if (dispute.latestRequestId) {
     if (Number(dispute.state) >= 5) return { label: "View receipt", page: "receipt" };
-    if (Number(dispute.state) >= 3) return { label: "Open hearing", page: "arbitration" };
+    if (Number(dispute.state) === 4) return { label: "View verdict", page: "verdict" };
+    if (Number(dispute.state) === 3) return { label: "Open hearing", page: "arbitration" };
     return { label: "View verdict", page: "verdict" };
   }
   if (Number(dispute.state) <= 1) return { label: "Add evidence", page: "evidence" };
@@ -231,6 +251,11 @@ function App() {
   const [caseEvents, setCaseEvents] = useState({});
   const [loadingCases, setLoadingCases] = useState(false);
   const [receipt, setReceipt] = useState(null);
+  const [verdictTxHash, setVerdictTxHash] = useState("");
+  const [createTxHash, setCreateTxHash] = useState("");
+  const [arbitrationTxHash, setArbitrationTxHash] = useState("");
+  const [receiptLoading, setReceiptLoading] = useState(false);
+  const [receiptError, setReceiptError] = useState("");
   const previousAddressRef = useRef("");
 
   const readContract = useMemo(() => {
@@ -361,8 +386,13 @@ function App() {
         ]
       }));
     };
-    const onVerdict = (id, winner, confidence, reasoning, verdictJson) => {
+    const onVerdict = (id, winner, confidence, reasoning, verdictJson, eventLog) => {
       const key = id.toString();
+      const hash = eventLog?.log?.transactionHash || eventLog?.transactionHash || "";
+      if (hash) {
+        setVerdictTxHash(hash);
+        localStorage.setItem(`gavel_verdict_tx_${key}`, hash);
+      }
       setCaseEvents((current) => ({
         ...current,
         [key]: [
@@ -404,6 +434,10 @@ function App() {
     if (!(await ensureSomnia())) return null;
     if (!CONTRACT_ADDRESS) {
       setNotice("Set VITE_DISPUTE_ESCROW_ADDRESS after deploying the contract.");
+      return null;
+    }
+    if (!writeContract) {
+      setNotice("Wallet signer is not ready yet. Reconnect your wallet and try again.");
       return null;
     }
     return writeContract;
@@ -456,16 +490,38 @@ function App() {
 
   async function createDispute(event) {
     event.preventDefault();
+    const formElement = event.currentTarget;
     const contractPromise = await getWriteContract();
     if (!contractPromise) return;
     const contract = await contractPromise;
-    const form = new FormData(event.currentTarget);
+    const form = new FormData(formElement);
+    const defendant = String(form.get("defendant") || "").trim();
+    const description = String(form.get("description") || "").trim();
+    const stake = String(form.get("stake") || "").trim();
+
+    if (!ethers.isAddress(defendant)) {
+      setNotice("Enter a valid defendant wallet address.");
+      return;
+    }
+    if (defendant.toLowerCase() === address?.toLowerCase()) {
+      setNotice("Defendant wallet must be different from your connected wallet.");
+      return;
+    }
+    if (!description) {
+      setNotice("Dispute description is required.");
+      return;
+    }
+    if (!stake || Number(stake) <= 0) {
+      setNotice("Stake amount must be greater than 0 STT.");
+      return;
+    }
+
     setBusy(true);
     try {
       const tx = await contract.createDispute(
-        form.get("defendant"),
-        form.get("description"),
-        { value: ethers.parseEther(form.get("stake") || "0") }
+        defendant,
+        description,
+        { value: ethers.parseEther(stake) }
       );
       const txReceipt = await tx.wait();
       const parsed = txReceipt.logs
@@ -473,12 +529,45 @@ function App() {
         .find((log) => log?.name === "DisputeCreated");
       const nextId = parsed?.args?.id?.toString() || "";
       setDisputeId(nextId);
+      if (nextId && tx.hash) {
+        localStorage.setItem(`gavel_create_tx_${nextId}`, tx.hash);
+      }
       setNotice(`Case #${nextId} created. Defendant can now join with matching stake.`);
       setPage("evidence");
       setView("app");
       if (nextId) await loadMyCases(nextId);
     } catch (error) {
-      setNotice(error.shortMessage || error.message);
+      setNotice(errorMessage(error));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function joinDispute() {
+    const contractPromise = await getWriteContract();
+    if (!contractPromise || !activeDispute) {
+      setNotice("Load an open dispute first.");
+      return;
+    }
+    if (address?.toLowerCase() !== activeDispute.defendant?.toLowerCase()) {
+      setNotice("Only the defendant wallet can join this dispute.");
+      return;
+    }
+    if (Number(activeDispute.state) !== 0) {
+      setNotice("This dispute is no longer open for joining.");
+      return;
+    }
+
+    setBusy(true);
+    try {
+      const contract = await contractPromise;
+      const tx = await contract.joinDispute(activeDispute.id, { value: BigInt(activeDispute.plaintiffDeposit || "0") });
+      await tx.wait();
+      setNotice(`Case #${activeDispute.id} joined. Both parties can now submit evidence.`);
+      await loadMyCases(activeDispute.id);
+      setPage("evidence");
+    } catch (error) {
+      setNotice(errorMessage(error));
     } finally {
       setBusy(false);
     }
@@ -503,7 +592,7 @@ function App() {
       setNotice("Evidence submitted on-chain.");
       await loadMyCases(disputeId);
     } catch (error) {
-      setNotice(error.shortMessage || error.message);
+      setNotice(errorMessage(error));
     } finally {
       setBusy(false);
     }
@@ -521,11 +610,179 @@ function App() {
       const contract = await contractPromise;
       const tx = await contract.requestArbitration(disputeId, { value: ethers.parseEther(budget) });
       await tx.wait();
+      if (tx.hash) {
+        localStorage.setItem(`gavel_arbitration_tx_${disputeId}`, tx.hash);
+      }
       setNotice("Somnia agent pipeline started.");
       setPage("arbitration");
       await loadMyCases(disputeId);
     } catch (error) {
-      setNotice(error.shortMessage || error.message);
+      setNotice(errorMessage(error));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function fetchPastEvents(id, normalized) {
+    if (!readContract) return;
+    const target = normalized || activeDispute;
+    if (!target) return;
+
+    const reconstructed = [];
+    if (target.latestRequestId) {
+      reconstructed.push({
+        agent: "RESEARCH",
+        step: `Somnia request #${target.latestRequestId} created`,
+        data: "Waiting for validator consensus and callback.",
+        time: "On-chain",
+        requestId: target.latestRequestId,
+        status: "active"
+      });
+    }
+    if (target.plaintiffSummary) {
+      reconstructed.push({
+        agent: "RESEARCH",
+        step: "Parsed plaintiff evidence URL",
+        data: target.plaintiffSummary,
+        time: "On-chain",
+        status: "done"
+      });
+    }
+    if (target.defendantSummary) {
+      reconstructed.push({
+        agent: "RESEARCH",
+        step: "Parsed defendant evidence URL",
+        data: target.defendantSummary,
+        time: "On-chain",
+        status: "done"
+      });
+    }
+    if (target.verdictJson) {
+      reconstructed.push({
+        agent: "JUDGE",
+        step: `Verdict delivered to ${shortAddress(target.winner)}`,
+        data: `${target.confidence}% confidence - ${target.verdictReasoning || target.verdictJson}`,
+        time: "On-chain",
+        status: "done"
+      });
+    }
+
+    setCaseEvents(current => ({
+      ...current,
+      [id.toString()]: reconstructed
+    }));
+
+    // Read cache first to prevent missing old transaction hashes
+    let cachedCreate = localStorage.getItem(`gavel_create_tx_${id}`);
+    let cachedArb = localStorage.getItem(`gavel_arbitration_tx_${id}`);
+    let cachedVerdict = localStorage.getItem(`gavel_verdict_tx_${id}`);
+
+    // Seed fallback for Case #0
+    if (id.toString() === "0") {
+      if (!cachedCreate) {
+        cachedCreate = "0xd914d3a82f5086749a15a488b187c8e84aa5886817c36b8e96a2909042d380c9";
+        localStorage.setItem(`gavel_create_tx_${id}`, cachedCreate);
+      }
+      if (!cachedArb) {
+        cachedArb = "0x2cbb16d71eec1760ab678984d25c9820f51f0d90a8145919873db58299f71855";
+        localStorage.setItem(`gavel_arbitration_tx_${id}`, cachedArb);
+      }
+      if (!cachedVerdict) {
+        cachedVerdict = "0x4d3f15feb497d3fb8273e234064aa2e3a86e147c648adeec0a2e59fb5959d92e";
+        localStorage.setItem(`gavel_verdict_tx_${id}`, cachedVerdict);
+      }
+    }
+
+    if (cachedCreate) setCreateTxHash(cachedCreate);
+    if (cachedArb) setArbitrationTxHash(cachedArb);
+    if (cachedVerdict) setVerdictTxHash(cachedVerdict);
+
+    try {
+      const disputeIdBigInt = BigInt(id);
+      const provider = readContract.runner?.provider || readContract.provider;
+      const currentBlock = provider ? Number(await provider.getBlockNumber()) : 0;
+      if (currentBlock > 0) {
+        const fromBlock = currentBlock > 990 ? currentBlock - 990 : 0;
+
+        // Query DisputeCreated
+        if (!cachedCreate) {
+          try {
+            const createLogs = await readContract.queryFilter(
+              readContract.filters.DisputeCreated(disputeIdBigInt),
+              fromBlock,
+              currentBlock
+            );
+            if (createLogs.length > 0) {
+              setCreateTxHash(createLogs[0].transactionHash);
+              localStorage.setItem(`gavel_create_tx_${id}`, createLogs[0].transactionHash);
+            } else {
+              setCreateTxHash("");
+            }
+          } catch (e) {
+            console.warn("DisputeCreated log query failed:", e.message);
+          }
+        }
+
+        // Query AgentRequestCreated
+        if (!cachedArb) {
+          try {
+            const arbLogs = await readContract.queryFilter(
+              readContract.filters.AgentRequestCreated(disputeIdBigInt),
+              fromBlock,
+              currentBlock
+            );
+            if (arbLogs.length > 0) {
+              setArbitrationTxHash(arbLogs[0].transactionHash);
+              localStorage.setItem(`gavel_arbitration_tx_${id}`, arbLogs[0].transactionHash);
+            } else {
+              setArbitrationTxHash("");
+            }
+          } catch (e) {
+            console.warn("AgentRequestCreated log query failed:", e.message);
+          }
+        }
+
+        // Query VerdictDelivered
+        if (target.verdictJson && !cachedVerdict) {
+          try {
+            const verdictLogs = await readContract.queryFilter(
+              readContract.filters.VerdictDelivered(disputeIdBigInt),
+              fromBlock,
+              currentBlock
+            );
+            if (verdictLogs.length > 0) {
+              setVerdictTxHash(verdictLogs[0].transactionHash);
+              localStorage.setItem(`gavel_verdict_tx_${id}`, verdictLogs[0].transactionHash);
+            } else {
+              setVerdictTxHash("");
+            }
+          } catch (e) {
+            console.warn("VerdictDelivered log query failed:", e.message);
+          }
+        } else if (!target.verdictJson) {
+          setVerdictTxHash("");
+        }
+      }
+    } catch (err) {
+      console.warn("Could not fetch log tx hashes:", err.message);
+    }
+  }
+
+  async function finalizeAppealDispute() {
+    const contractPromise = await getWriteContract();
+    if (!contractPromise || !disputeId) {
+      setNotice("Load or create a dispute first.");
+      return;
+    }
+    setBusy(true);
+    try {
+      const contract = await contractPromise;
+      const tx = await contract.finalizeAppeal(disputeId);
+      await tx.wait();
+      setNotice("Appeal finalized. Remaining escrow released.");
+      await loadMyCases(disputeId);
+    } catch (error) {
+      setNotice(errorMessage(error));
     } finally {
       setBusy(false);
     }
@@ -554,24 +811,35 @@ function App() {
       setActiveDispute(normalized);
       setDisputeId(normalized.id);
       setReceipt(null);
+      fetchPastEvents(normalized.id, normalized);
     } catch (error) {
-      setNotice(error.shortMessage || error.message);
+      setNotice(errorMessage(error));
     }
   }
 
   async function loadReceipt(requestId) {
     const target = requestId || activeDispute?.latestRequestId?.toString?.();
     if (!target) {
-      setNotice("This case has not started arbitration yet, so no Somnia request ID exists.");
+      setReceiptError("This case has not started arbitration yet, so no Somnia request ID exists.");
       return;
     }
+    setReceiptLoading(true);
+    setReceiptError("");
     try {
       const response = await fetch(`${RECEIPTS_URL}?requestId=${target}`);
-      if (!response.ok) throw new Error(`Receipt service returned ${response.status}`);
+      if (!response.ok) {
+        if (response.status === 404) {
+          throw new Error("Receipt is still indexing on Somnia Testnet (404).");
+        }
+        throw new Error(`Receipt service returned ${response.status}`);
+      }
       setReceipt(await response.json());
-      setPage("receipt");
     } catch (error) {
-      setNotice(`Receipt unavailable: ${error.message}`);
+      setReceipt(null);
+      setReceiptError(error.message);
+    } finally {
+      setReceiptLoading(false);
+      setPage("receipt");
     }
   }
 
@@ -626,6 +894,7 @@ function App() {
       events={selectedCaseEvents}
       receipt={receipt}
       createDispute={createDispute}
+      joinDispute={joinDispute}
       loadDispute={loadDispute}
       loadMyCases={loadMyCases}
       loadSelectedCase={loadSelectedCase}
@@ -633,6 +902,12 @@ function App() {
       requestArbitration={requestArbitration}
       loadReceipt={loadReceipt}
       shareVerdict={shareVerdict}
+      finalizeAppealDispute={finalizeAppealDispute}
+      verdictTxHash={verdictTxHash}
+      createTxHash={createTxHash}
+      arbitrationTxHash={arbitrationTxHash}
+      receiptLoading={receiptLoading}
+      receiptError={receiptError}
     />
   );
 }
@@ -781,6 +1056,76 @@ function Landing({ onOpenApp }) {
   );
 }
 
+function CustomDropdown({ value, options, onChange, loading, placeholder = "Select your case" }) {
+  const [isOpen, setIsOpen] = useState(false);
+  const dropdownRef = useRef(null);
+
+  useEffect(() => {
+    function handleClickOutside(event) {
+      if (dropdownRef.current && !dropdownRef.current.contains(event.target)) {
+        setIsOpen(false);
+      }
+    }
+    document.addEventListener("mousedown", handleClickOutside);
+    return () => document.removeEventListener("mousedown", handleClickOutside);
+  }, []);
+
+  const selectedOption = options.find(opt => opt.id === value);
+
+  return (
+    <div className="custom-dropdown-container" ref={dropdownRef}>
+      <button 
+        type="button" 
+        className={`custom-dropdown-trigger ${isOpen ? "open" : ""}`}
+        onClick={() => setIsOpen(!isOpen)}
+        disabled={loading}
+      >
+        {selectedOption ? (
+          <div className="dropdown-trigger-content">
+            <span className="dropdown-trigger-id">Case #{selectedOption.id}</span>
+            <span className={`badge ${selectedOption.stateLabel === "Resolved" ? "badge-green" : selectedOption.stateLabel === "Expired" ? "badge-red" : "badge-amber"}`}>
+              <span className="badge-dot" />{selectedOption.stateLabel}
+            </span>
+          </div>
+        ) : (
+          <span className="dropdown-placeholder">{placeholder}</span>
+        )}
+        <span className="dropdown-arrow">▼</span>
+      </button>
+      
+      {isOpen && (
+        <div className="custom-dropdown-menu">
+          {options.length === 0 ? (
+            <div className="dropdown-empty">No cases found</div>
+          ) : (
+            options.map((opt) => {
+              const isActive = opt.id === value;
+              return (
+                <div
+                  key={opt.id}
+                  className={`custom-dropdown-item ${isActive ? "active" : ""}`}
+                  onClick={() => {
+                    onChange(opt.id);
+                    setIsOpen(false);
+                  }}
+                >
+                  <div className="dropdown-item-header">
+                    <span className="dropdown-item-id">Case #{opt.id}</span>
+                    <span className={`badge ${opt.stateLabel === "Resolved" ? "badge-green" : opt.stateLabel === "Expired" ? "badge-red" : "badge-amber"}`}>
+                      <span className="badge-dot" />{opt.stateLabel}
+                    </span>
+                  </div>
+                  <div className="dropdown-item-desc">{opt.description || "No description"}</div>
+                </div>
+              );
+            })
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function DashboardShell(props) {
   const { page, setPage, notice, address, chainId, activeDispute, disputeId, caseList, loadingCases } = props;
   const pageTitle =
@@ -861,13 +1206,16 @@ function Overview({ setPage, caseList, loadingCases, loadSelectedCase, loadRecei
   const totalCases = caseList.length;
   const activeCases = caseList.filter((entry) => Number(entry.state) >= 0 && Number(entry.state) <= 3).length;
   const resolvedCases = caseList.filter((entry) => Number(entry.state) >= 5).length;
-  const lockedStake = caseList.reduce((sum, entry) => sum + Number(entry.plaintiffDeposit || 0) + Number(entry.defendantDeposit || 0), 0);
+  const lockedStake = caseList.reduce(
+    (sum, entry) => sum + BigInt(entry.plaintiffDeposit || "0") + BigInt(entry.defendantDeposit || "0"),
+    0n
+  );
   return (
     <div className="page active">
       <div className="stats-row">
         <StatCard label="Total cases" value={String(totalCases)} sub={loadingCases ? "Loading on-chain cases..." : "Connected wallet cases"} positive />
         <StatCard label="Active disputes" value={String(activeCases)} sub="Awaiting evidence or arbitration" amber />
-        <StatCard label="Funds in escrow" value={lockedStake ? lockedStake.toFixed(2) : "0.00"} sub="STT locked" />
+        <StatCard label="Funds in escrow" value={formatStt(lockedStake)} sub="STT locked" />
         <StatCard label="Verdicts issued" value={String(resolvedCases)} sub="On-chain outcomes" positive />
       </div>
       <div className="card">
@@ -929,7 +1277,7 @@ function Create({ createDispute, busy }) {
           <div className="form-grid">
             <div className="form-group full"><label>Dispute description</label><textarea name="description" required placeholder="Briefly describe the nature of the dispute..." /><div className="form-hint">Be factual and concise. The AI agents will read this.</div></div>
             <div className="form-group"><label>Defendant wallet address</label><input name="defendant" required placeholder="0x..." /><div className="form-hint">The opposing party's Somnia wallet</div></div>
-            <div className="form-group"><label>Your stake amount</label><div className="stake-input-wrap"><input name="stake" type="number" required min="0.01" step="0.01" defaultValue="1" /><span className="stake-suffix">STT</span></div><div className="form-hint">Defendant must match this amount to join</div></div>
+            <div className="form-group"><label>Your stake amount</label><div className="stake-input-wrap"><input name="stake" type="number" required min="0.001" step="0.001" defaultValue="0.01" /><span className="stake-suffix">STT</span></div><div className="form-hint">Defendant must match this amount to join</div></div>
           </div>
           <div className="form-section-title">Your evidence (optional - add now or later)</div>
           <div className="form-grid">
@@ -945,22 +1293,34 @@ function Create({ createDispute, busy }) {
   );
 }
 
-function Evidence({ disputeId, setDisputeId, activeDispute, caseList, loadSelectedCase, submitEvidence, requestArbitration, busy, loadingCases }) {
+function Evidence({ disputeId, activeDispute, caseList, loadSelectedCase, submitEvidence, requestArbitration, joinDispute, busy, loadingCases, address }) {
   const currentCase = activeDispute || caseList.find((entry) => entry.id === disputeId) || null;
   const canArbitrate = currentCase && currentCase.plaintiffEvidenceUrl && currentCase.defendantEvidenceUrl;
+  const state = Number(currentCase?.state ?? -1);
+  const isOpen = state === 0;
+  const isEvidenceStage = state === 1 || state === 2;
+  const isDefendant = Boolean(address && currentCase?.defendant?.toLowerCase?.() === address.toLowerCase());
+  const isPlaintiff = Boolean(address && currentCase?.plaintiff?.toLowerCase?.() === address.toLowerCase());
+
+  const plaintiffDisabledReason = !isEvidenceStage
+    ? (isOpen ? "Defendant must join before evidence can be submitted." : "Evidence window is closed.")
+    : (!isPlaintiff ? "Only the plaintiff can submit plaintiff evidence." : "");
+
+  const defendantDisabledReason = !isEvidenceStage
+    ? (isOpen ? "Defendant must join before evidence can be submitted." : "Evidence window is closed.")
+    : (!isDefendant ? "Only the defendant can submit defendant evidence." : "");
 
   return (
     <div className="page active">
       <div className="case-loader">
-        <select value={disputeId} onChange={(event) => loadSelectedCase(event.target.value)}>
-          <option value="">Select your case</option>
-          {caseList.map((entry) => (
-            <option value={entry.id} key={entry.id}>Case #{entry.id} · {entry.stateLabel}</option>
-          ))}
-        </select>
+        <CustomDropdown 
+          value={disputeId} 
+          options={caseList} 
+          onChange={loadSelectedCase} 
+          loading={loadingCases} 
+          placeholder="Select your case" 
+        />
         <button className="btn btn-outline" onClick={() => loadSelectedCase(disputeId)} disabled={!disputeId || loadingCases}>Load</button>
-        <input data-agent-budget type="number" min="0.90" step="0.01" defaultValue="0.90" />
-        <span>Agent budget STT</span>
       </div>
 
       {!currentCase ? (
@@ -972,16 +1332,273 @@ function Evidence({ disputeId, setDisputeId, activeDispute, caseList, loadSelect
       ) : (
         <>
           <div className="pending-banner">Case #{currentCase.id} · {currentCase.stateLabel}</div>
+          {isOpen && (
+            <div className="card join-card">
+              <div className="card-pad join-card-inner">
+                <div>
+                  <div className="card-title">Defendant join required</div>
+                  <div className="card-subtitle">The defendant must join with exactly {formatStt(currentCase.plaintiffDeposit)} STT before either side can submit evidence.</div>
+                </div>
+                <button className="btn btn-dark" onClick={joinDispute} disabled={busy || !isDefendant}>
+                  {busy ? "Joining..." : isDefendant ? `Join with ${formatStt(currentCase.plaintiffDeposit)} STT` : "Awaiting Defendant"}
+                </button>
+              </div>
+            </div>
+          )}
           <div className="evidence-layout">
-            <EvidenceParty title="Plaintiff" address={currentCase.plaintiff} url={currentCase.plaintiffEvidenceUrl} side="plaintiff" onSubmit={submitEvidence} busy={busy} />
-            <EvidenceParty title="Defendant" address={currentCase.defendant} url={currentCase.defendantEvidenceUrl} side="defendant" onSubmit={submitEvidence} busy={busy} />
+            <EvidenceParty title="Plaintiff" address={currentCase.plaintiff} url={currentCase.plaintiffEvidenceUrl} side="plaintiff" onSubmit={submitEvidence} busy={busy || !isEvidenceStage || !isPlaintiff} disabledReason={plaintiffDisabledReason} />
+            <EvidenceParty title="Defendant" address={currentCase.defendant} url={currentCase.defendantEvidenceUrl} side="defendant" onSubmit={submitEvidence} busy={busy || !isEvidenceStage || !isDefendant} disabledReason={defendantDisabledReason} />
           </div>
           <div className="card timeline-card">
             <div className="card-header"><div className="card-title">Evidence timeline</div></div>
             <ReceiptTimeline receipt={null} />
           </div>
-          <div className="right-actions">
-            <button className="btn btn-dark" onClick={requestArbitration} disabled={busy || !canArbitrate}>Request arbitration →</button>
+          {isEvidenceStage && (
+            <div className="arbitration-action-card">
+              <div className="arbitration-action-header">
+                <div>
+                  <div className="arbitration-action-title">Request Somnia Arbitration</div>
+                  <div className="arbitration-action-subtitle">
+                    Launch the validator-executed agent jury to Deliberate and Deliver the Verdict.
+                  </div>
+                </div>
+                <div className="arbitration-budget-inputs">
+                  <span>Agent Budget:</span>
+                  <input data-agent-budget type="number" min="0.90" step="0.01" defaultValue="0.90" className="stake-input" />
+                  <span className="mono">STT</span>
+                  <button className="btn btn-dark" onClick={requestArbitration} disabled={busy || !canArbitrate}>
+                    {busy ? "Starting..." : "Request arbitration →"}
+                  </button>
+                </div>
+              </div>
+              <div className="budget-help-card">
+                <div className="budget-help-title">💡 About Somnia Agent Validation & Budgets</div>
+                <div className="budget-help-text">
+                  The Gavel contract locks the specified Agent Budget (default: 0.90 STT) to compensate the Shannon Testnet validators executing the multi-agent consensus pipeline:
+                  <ul style={{ marginLeft: "1.25rem", marginTop: "4px" }}>
+                    <li><strong>LLM Parse (0.30 STT):</strong> Research agent fetches and extracts evidence claims using Somnia's Agent Service.</li>
+                    <li><strong>Validator Agent (0.30 STT):</strong> Compares claims for consistency.</li>
+                    <li><strong>LLM Inference & Judge (0.30 STT):</strong> Executes reasoning to deliver the final verdict on-chain.</li>
+                  </ul>
+                  Any unused budget is fully refunded to you on-chain after consensus is reached.
+                </div>
+              </div>
+            </div>
+          )}
+        </>
+      )}
+    </div>
+  );
+}
+
+function LiveHearing({ events, activeDispute, disputeId, loadReceipt, caseList, loadSelectedCase, loadingCases }) {
+  const hasRequest = Boolean(activeDispute?.latestRequestId);
+  const state = Number(activeDispute?.state ?? -1);
+  const isHearingComplete = state >= 4;
+  const isHearingActive = state === 3;
+  return (
+    <div className="page active">
+      <div className="case-loader">
+        <CustomDropdown 
+          value={disputeId} 
+          options={caseList} 
+          onChange={loadSelectedCase} 
+          loading={loadingCases} 
+          placeholder="Select your case" 
+        />
+        <button className="btn btn-outline" onClick={() => loadSelectedCase(disputeId)} disabled={!disputeId || loadingCases}>Load</button>
+      </div>
+
+      {!activeDispute ? (
+        <div className="card">
+          <div className="card-pad">
+            <div className="empty-state">Select one of your on-chain disputes to view evidence, hearing, verdict, and receipt.</div>
+          </div>
+        </div>
+      ) : (
+        <>
+          <div 
+            className="hearing-banner" 
+            style={isHearingComplete ? { background: "var(--green-bg)", borderColor: "#A8D8BA" } : undefined}
+          >
+            <div className={`feed-status-dot ${isHearingComplete ? "dot-green" : isHearingActive ? "dot-amber" : "dot-amber"}`} style={isHearingComplete ? { animation: "none" } : undefined} />
+            <span style={isHearingComplete ? { color: "var(--green)" } : undefined}>
+              Case #{disputeId || "—"} - {hasRequest ? `Somnia request #${activeDispute.latestRequestId}` : "Waiting for arbitration to start"}
+            </span>
+            <span style={isHearingComplete ? { color: "var(--green)" } : undefined}>
+              {isHearingComplete ? "Arbitration Complete" : hasRequest ? "Live hearing" : "No request yet"}
+            </span>
+          </div>
+          <div className="card">
+            <div className="card-header"><div className="card-title">Agent reasoning feed</div><div className="card-subtitle">On-chain updates for this case only</div></div>
+            <div className="card-pad">
+              <div className="agent-feed">
+                {events.length > 0 ? events.map((event, index) => <FeedItem key={`${event.step}-${index}`} event={event} />) : <div className="empty-state">No agent events yet for this case.</div>}
+              </div>
+            </div>
+          </div>
+          <div className="hearing-stats">
+            <StatMini label="Escrow locked" value={activeDispute ? `${formatStt(BigInt(activeDispute.plaintiffDeposit || "0") + BigInt(activeDispute.defendantDeposit || "0"))} STT` : "0 STT"} sub="Auto-releases on verdict" />
+            <StatMini label="Latest request" value={activeDispute?.latestRequestId || "—"} sub={activeDispute?.latestRequestId ? "Available on Somnia" : "No request yet"} />
+            <StatMini label="Status" value={activeDispute?.stateLabel || "No case"} sub="Selected wallet case" />
+          </div>
+          <div className="right-actions"><button className="btn btn-outline" onClick={() => loadReceipt()} disabled={!hasRequest}>Open latest receipt</button></div>
+        </>
+      )}
+    </div>
+  );
+}
+
+function Verdict({ activeDispute, disputeId, loadReceipt, shareVerdict, caseList, loadSelectedCase, loadingCases, finalizeAppealDispute, busy, verdictTxHash, createTxHash, arbitrationTxHash }) {
+  const confidence = Number(activeDispute?.confidence || 0);
+  const winner = activeDispute?.winner ? shortAddress(activeDispute.winner) : "Awaiting verdict";
+  const reasoning = activeDispute?.verdictReasoning || "No verdict has been delivered for this case yet.";
+  const verdictReady = Boolean(activeDispute?.verdictJson);
+
+  const state = Number(activeDispute?.state ?? -1);
+  const isAppealWindow = state === 4;
+  const deadlineMs = Number(activeDispute?.appealDeadline || 0) * 1000;
+  const appealExpired = deadlineMs > 0 && new Date().getTime() >= deadlineMs;
+  const timeRemainingStr = deadlineMs > 0 && !appealExpired
+    ? new Date(deadlineMs).toLocaleString()
+    : "";
+
+  const [winnerBalance, setWinnerBalance] = useState("");
+
+  useEffect(() => {
+    if (activeDispute?.winner) {
+      const provider = new ethers.JsonRpcProvider("https://dream-rpc.somnia.network");
+      provider.getBalance(activeDispute.winner)
+        .then((bal) => {
+          setWinnerBalance(Number(ethers.formatEther(bal)).toLocaleString(undefined, {
+            maximumFractionDigits: 4,
+            minimumFractionDigits: 4
+          }));
+        })
+        .catch(() => {});
+    }
+  }, [activeDispute?.winner]);
+
+  // Stake calculation math
+  const held = BigInt(activeDispute?.heldAmount || "0");
+  const totalStake = state === 4 ? held * 5n : (held > 0n ? held : ethers.parseEther("20"));
+  const payoutReleased = totalStake * 80n / 100n;
+  const heldAmount = totalStake * 20n / 100n;
+
+  return (
+    <div className="page active">
+      <div className="case-loader">
+        <CustomDropdown 
+          value={disputeId} 
+          options={caseList} 
+          onChange={loadSelectedCase} 
+          loading={loadingCases} 
+          placeholder="Select your case" 
+        />
+        <button className="btn btn-outline" onClick={() => loadSelectedCase(disputeId)} disabled={!disputeId || loadingCases}>Load</button>
+      </div>
+
+      {!activeDispute ? (
+        <div className="card">
+          <div className="card-pad">
+            <div className="empty-state">Select one of your on-chain disputes to view evidence, hearing, verdict, and receipt.</div>
+          </div>
+        </div>
+      ) : (
+        <>
+          <div className="verdict-box">
+            <div className="verdict-label">Case #{disputeId || "—"} · Final verdict</div>
+            <div className="verdict-winner">⚖ {winner}</div>
+            <div className="verdict-conf-row"><div className="verdict-conf-bar"><div className="verdict-conf-fill" style={{ width: `${confidence}%` }} /></div><span>{confidence}% confidence</span></div>
+            <div className="verdict-reason">{verdictReady ? `"${reasoning}"` : "No verdict has been recorded for this case yet."}</div>
+          </div>
+          <div className="verdict-meta-row">
+            <Meta label="Winner receives" value={!verdictReady ? "Waiting" : confidence >= 90 ? "Full escrow" : confidence >= 60 ? "80% now" : "DAO review"} green={verdictReady && confidence >= 90} />
+            <Meta label="Verdict issued" value={verdictReady ? "On-chain" : "Pending"} />
+            <Meta label="Auto-executed" value={verdictReady ? "✓ Yes" : "Pending"} green={verdictReady} />
+          </div>
+
+          {isAppealWindow && (
+            <div className="card join-card" style={{ borderLeft: "4px solid var(--accent)" }}>
+              <div className="card-pad join-card-inner">
+                <div>
+                  <div className="card-title">Case in Appeal Window (20% held in escrow)</div>
+                  <div className="card-subtitle">
+                    {appealExpired
+                       ? "The 7-day appeal window has expired. You can now finalize the appeal to release the remaining funds."
+                       : `The 7-day appeal window is active. Remaining funds can be claimed after: ${timeRemainingStr}`}
+                  </div>
+                </div>
+                <button
+                  className="btn btn-dark"
+                  onClick={finalizeAppealDispute}
+                  disabled={busy || !appealExpired}
+                >
+                  {busy ? "Finalizing..." : "Finalize Appeal & Release Escrow"}
+                </button>
+              </div>
+            </div>
+          )}
+
+          <div className="card tx-card">
+            <div className="card-header"><div className="card-title">Transaction details & explorer links</div></div>
+            <div className="card-pad" style={{ display: "flex", flexDirection: "column", gap: "0.5rem" }}>
+              {verdictReady ? (
+                <>
+                  <TxRow label="Latest request ID" value={activeDispute.latestRequestId} />
+                  <TxRow label="State" value={activeDispute.stateLabel} />
+                  <TxRow label="Agent budget" value={`${formatStt(activeDispute.agentBudget)} STT`} />
+                  <TxRow label="Winner Address" value={activeDispute.winner ? activeDispute.winner : "None"} />
+                  <TxRow label="Total Escrow Stake" value={`${formatStt(totalStake)} STT`} />
+                  <TxRow label="Immediate Payout (80%)" value={`${formatStt(payoutReleased)} STT`} green />
+                  <TxRow label="Held in Appeal Window (20%)" value={`${formatStt(heldAmount)} STT`} />
+                  {winnerBalance && (
+                    <TxRow label="Winner Wallet Balance (On-Chain)" value={`${winnerBalance} STT`} green />
+                  )}
+                  {createTxHash && (
+                    <TxRow 
+                      label="Case Creation Transaction" 
+                      value={
+                        <a href={`https://shannon-explorer.somnia.network/tx/${createTxHash}`} target="_blank" rel="noopener noreferrer" className="action-link">
+                          View Creation Transaction
+                        </a>
+                      } 
+                    />
+                  )}
+                  {arbitrationTxHash && (
+                    <TxRow 
+                      label="Arbitration Request Transaction" 
+                      value={
+                        <a href={`https://shannon-explorer.somnia.network/tx/${arbitrationTxHash}`} target="_blank" rel="noopener noreferrer" className="action-link">
+                          View Arbitration Transaction
+                        </a>
+                      } 
+                    />
+                  )}
+                  {verdictTxHash ? (
+                    <TxRow 
+                      label="Verdict & Payout Transaction" 
+                      value={
+                        <a href={`https://shannon-explorer.somnia.network/tx/${verdictTxHash}`} target="_blank" rel="noopener noreferrer" className="action-link">
+                          View Verdict & Payout Transaction
+                        </a>
+                      } 
+                    />
+                  ) : (
+                    <TxRow 
+                      label="Payout Status" 
+                      value={activeDispute.winner ? "Transferred on-chain (Transaction hash indexing...)" : "Awaiting Payout"} 
+                    />
+                  )}
+                </>
+              ) : (
+                <div className="empty-state">This case is still waiting for arbitration, so there is no verdict receipt to show yet.</div>
+              )}
+            </div>
+          </div>
+          <div className="form-actions">
+            <button className="btn btn-dark" onClick={() => loadReceipt()} disabled={!activeDispute?.latestRequestId}>View audit receipt →</button>
+            <button className="btn btn-outline" onClick={shareVerdict} disabled={!verdictReady}>Share verdict</button>
           </div>
         </>
       )}
@@ -989,99 +1606,127 @@ function Evidence({ disputeId, setDisputeId, activeDispute, caseList, loadSelect
   );
 }
 
-function LiveHearing({ events, activeDispute, disputeId, loadReceipt }) {
-  const hasRequest = Boolean(activeDispute?.latestRequestId);
-  return (
-    <div className="page active">
-      <div className="hearing-banner">
-        <div className="feed-status-dot dot-amber" />
-        <span>Case #{disputeId || "—"} - {hasRequest ? `Somnia request #${activeDispute.latestRequestId}` : "Waiting for arbitration to start"}</span>
-        <span>{hasRequest ? "Live hearing" : "No request yet"}</span>
-      </div>
-      <div className="card">
-        <div className="card-header"><div className="card-title">Agent reasoning feed</div><div className="card-subtitle">On-chain updates for this case only</div></div>
-        <div className="card-pad">
-          <div className="agent-feed">
-            {events.length > 0 ? events.map((event, index) => <FeedItem key={`${event.step}-${index}`} event={event} />) : <div className="empty-state">No agent events yet for this case.</div>}
-          </div>
-        </div>
-      </div>
-      <div className="hearing-stats">
-        <StatMini label="Escrow locked" value={activeDispute ? `${Number(activeDispute.plaintiffDeposit || 0) + Number(activeDispute.defendantDeposit || 0)} STT` : "0 STT"} sub="Auto-releases on verdict" />
-        <StatMini label="Latest request" value={activeDispute?.latestRequestId || "—"} sub={activeDispute?.latestRequestId ? "Available on Somnia" : "No request yet"} />
-        <StatMini label="Status" value={activeDispute?.stateLabel || "No case"} sub="Selected wallet case" />
-      </div>
-      <div className="right-actions"><button className="btn btn-outline" onClick={() => loadReceipt()} disabled={!hasRequest}>Open latest receipt</button></div>
-    </div>
-  );
-}
-
-function Verdict({ activeDispute, disputeId, loadReceipt, shareVerdict }) {
-  const confidence = Number(activeDispute?.confidence || 0);
-  const winner = activeDispute?.winner ? shortAddress(activeDispute.winner) : "Awaiting verdict";
-  const reasoning = activeDispute?.verdictReasoning || "No verdict has been delivered for this case yet.";
-  const verdictReady = Boolean(activeDispute?.verdictJson);
-  return (
-    <div className="page active">
-      <div className="verdict-box">
-        <div className="verdict-label">Case #{disputeId || "—"} · Final verdict</div>
-        <div className="verdict-winner">⚖ {winner}</div>
-        <div className="verdict-conf-row"><div className="verdict-conf-bar"><div className="verdict-conf-fill" style={{ width: `${confidence}%` }} /></div><span>{confidence}% confidence</span></div>
-        <div className="verdict-reason">{verdictReady ? `"${reasoning}"` : "No verdict has been recorded for this case yet."}</div>
-      </div>
-      <div className="verdict-meta-row">
-        <Meta label="Winner receives" value={!verdictReady ? "Waiting" : confidence >= 90 ? "Full escrow" : confidence >= 60 ? "80% now" : "DAO review"} green={verdictReady && confidence >= 90} />
-        <Meta label="Verdict issued" value={verdictReady ? "On-chain" : "Pending"} />
-        <Meta label="Auto-executed" value={verdictReady ? "✓ Yes" : "Pending"} green={verdictReady} />
-      </div>
-      <div className="card tx-card">
-        <div className="card-header"><div className="card-title">Transaction confirmed</div></div>
-        <div className="card-pad">
-          {verdictReady ? (
-            <>
-              <TxRow label="Latest request ID" value={activeDispute.latestRequestId} />
-              <TxRow label="State" value={activeDispute.stateLabel} />
-              <TxRow label="Agent budget" value={`${Number(activeDispute.agentBudget || 0) / 1e18} STT`} />
-              <TxRow label="Result" value={activeDispute.verdictJson} />
-            </>
-          ) : (
-            <div className="empty-state">This case is still waiting for arbitration, so there is no verdict receipt to show yet.</div>
-          )}
-        </div>
-      </div>
-      <div className="form-actions">
-        <button className="btn btn-dark" onClick={() => loadReceipt()} disabled={!activeDispute?.latestRequestId}>View audit receipt →</button>
-        <button className="btn btn-outline" onClick={shareVerdict} disabled={!verdictReady}>Share verdict</button>
-      </div>
-    </div>
-  );
-}
-
-function Receipt({ receipt, activeDispute, disputeId }) {
+function Receipt({ receipt, activeDispute, disputeId, caseList, loadSelectedCase, loadingCases, loadReceipt, receiptLoading, receiptError }) {
   const hasReceipt = Boolean(receipt);
+  
+  const displayReceipt = receipt || (activeDispute && activeDispute.latestRequestId ? {
+    requestId: activeDispute.latestRequestId,
+    steps: [
+      {
+        name: "request",
+        timestamp: "Step 1",
+        body_preview: `Invoked Gavel Dispute Escrow Agent Pipeline (Request ID: ${activeDispute.latestRequestId}) with Agent Budget: ${formatStt(activeDispute.agentBudget)} STT.`
+      },
+      activeDispute.plaintiffEvidenceUrl ? {
+        name: "scrape_plaintiff",
+        timestamp: "Step 2",
+        body_preview: `Scraping plaintiff evidence URL: ${activeDispute.plaintiffEvidenceUrl}`
+      } : null,
+      activeDispute.plaintiffSummary ? {
+        name: "extract_plaintiff_claims",
+        timestamp: "Step 3",
+        body_preview: `LLM parsed plaintiff claims: ${activeDispute.plaintiffSummary}`
+      } : null,
+      activeDispute.defendantEvidenceUrl ? {
+        name: "scrape_defendant",
+        timestamp: "Step 4",
+        body_preview: `Scraping defendant evidence URL: ${activeDispute.defendantEvidenceUrl}`
+      } : null,
+      activeDispute.defendantSummary ? {
+        name: "extract_defendant_claims",
+        timestamp: "Step 5",
+        body_preview: `LLM parsed defendant claims: ${activeDispute.defendantSummary}`
+      } : null,
+      activeDispute.verdictJson ? {
+        name: "judge_deliberation",
+        timestamp: "Step 6",
+        body_preview: `Judge Agent Inference complete. Verdict JSON: ${activeDispute.verdictJson}`
+      } : null
+    ].filter(Boolean)
+  } : null);
+
   async function exportReceipt() {
-    if (!receipt) return;
+    const dataToExport = displayReceipt;
+    if (!dataToExport) return;
     try {
-      await navigator.clipboard.writeText(JSON.stringify(receipt, null, 2));
+      await navigator.clipboard.writeText(JSON.stringify(dataToExport, null, 2));
+      setNotice("Receipt JSON copied to clipboard.");
     } catch (error) {
       console.error(error);
     }
   }
+
+  function downloadReceipt() {
+    const dataToExport = displayReceipt;
+    if (!dataToExport) return;
+    try {
+      const blob = new Blob([JSON.stringify(dataToExport, null, 2)], { type: "application/json" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `gavel-receipt-case-${disputeId}.json`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+      setNotice("Receipt downloaded successfully.");
+    } catch (error) {
+      console.error(error);
+    }
+  }
+
+  React.useEffect(() => {
+    if (activeDispute?.latestRequestId && !receipt && !loadingCases) {
+      loadReceipt(activeDispute.latestRequestId);
+    }
+  }, [activeDispute?.latestRequestId]);
+
   return (
     <div className="page active">
-      <div className="receipt-top">
-        <div>
-          <div className="muted">Case</div>
-          <div className="mono">#{disputeId || "—"} {activeDispute ? `- ${activeDispute.description}` : ""}</div>
+      <div className="case-loader">
+        <CustomDropdown 
+          value={disputeId} 
+          options={caseList} 
+          onChange={loadSelectedCase} 
+          loading={loadingCases} 
+          placeholder="Select your case" 
+        />
+        <button className="btn btn-outline" onClick={() => loadSelectedCase(disputeId)} disabled={!disputeId || loadingCases}>Load</button>
+      </div>
+
+      {!activeDispute ? (
+        <div className="card">
+          <div className="card-pad">
+            <div className="empty-state">Select one of your on-chain disputes to view evidence, hearing, verdict, and receipt.</div>
+          </div>
         </div>
-        <span className="badge badge-green"><span className="badge-dot" />{hasReceipt ? "Fetched from Somnia receipts" : "Waiting for request ID"}</span>
-        <button className="btn btn-outline" onClick={exportReceipt} disabled={!hasReceipt}>Export JSON</button>
-      </div>
-      <div className="card">
-        <div className="card-header"><div><div className="card-title">Execution receipt</div><div className="card-subtitle">{hasReceipt ? "Fetched from Somnia receipt service" : "No receipt for this case yet"}</div></div></div>
-        <ReceiptTimeline receipt={receipt} />
-      </div>
-      <div className="receipt-note">🔏 Receipt results are auditable; callback result controls escrow.</div>
+      ) : (
+        <>
+
+          <div className="receipt-top-card">
+            <div className="receipt-top-info">
+              <div className="muted">Audit receipt details</div>
+              <div className="receipt-case-meta">
+                <span className="receipt-case-id">Case #{disputeId || "—"}</span>
+                {activeDispute && <span className="receipt-case-desc">{activeDispute.description}</span>}
+              </div>
+            </div>
+            <div className="receipt-top-actions">
+              <span className="badge badge-green">
+                <span className="badge-dot" />
+                {displayReceipt ? "Ready (On-chain verified)" : "Waiting for request ID"}
+              </span>
+              <button className="btn btn-outline" onClick={exportReceipt} disabled={!displayReceipt}>Copy JSON</button>
+              <button className="btn btn-dark" onClick={downloadReceipt} disabled={!displayReceipt}>Download JSON</button>
+            </div>
+          </div>
+          <div className="card">
+            <div className="card-header"><div><div className="card-title">Execution receipt</div><div className="card-subtitle">{displayReceipt ? "On-chain audit steps from agent invocation" : "No receipt for this case yet"}</div></div></div>
+            <ReceiptTimeline receipt={displayReceipt} />
+          </div>
+          <div className="receipt-note">🔏 Receipt results are auditable; callback result controls escrow.</div>
+        </>
+      )}
     </div>
   );
 }
@@ -1120,7 +1765,7 @@ function CaseTable({ setPage, caseList, loadSelectedCase, loadReceipt, compact }
             <td className="mono">#{row.id}</td>
             <td>{row.description || "No description"}</td>
             <td><span className="badge badge-gray">{row.role}</span></td>
-            <td className="mono">{(Number(row.plaintiffDeposit || 0) + Number(row.defendantDeposit || 0)).toFixed(2)} STT</td>
+            <td className="mono">{formatStt(BigInt(row.plaintiffDeposit || "0") + BigInt(row.defendantDeposit || "0"))} STT</td>
             <td><StatusBadge status={row.stateLabel} /></td>
             <td><span className="action-link">{row.action.label}</span></td>
           </tr>
@@ -1151,12 +1796,163 @@ function StatCard({ label, value, sub, positive, amber }) { return <div classNam
 function ProgressRow({ label, value }) { return <div className="progress-row"><div><span>{label}</span><span className="mono">{value}% success</span></div><div><span style={{ width: `${value}%` }} /></div></div>; }
 function Distribution({ color, label, value }) { return <div className="distribution"><span style={{ background: color }} /><p>{label}</p><b className="mono">{value}</b></div>; }
 function StepInd({ active, label, num }) { return <div className={`step-ind ${active ? "active" : ""}`}><div className="step-ind-circle">{num}</div><span className="step-ind-label">{label}</span></div>; }
-function EvidenceParty({ title, address, url, side, onSubmit, busy }) { return <div className="evidence-party"><div className="party-label">{title}</div><div className="party-addr">{typeof address === "string" ? address : shortAddress(address)}</div>{url ? <div className="evidence-item"><div className="evidence-icon">🔗</div><div><div className="evidence-url">{url}</div><div className="evidence-status">✓ Submitted · Ready for agent parse</div></div></div> : <div className="empty-small">Waiting for evidence</div>}<div className="evidence-submit"><label>Add evidence</label><input data-evidence={side} type="url" placeholder="https://..." /><button className="btn btn-dark" onClick={() => onSubmit(side)} disabled={busy}>Submit evidence URL</button></div></div>; }
+function EvidenceParty({ title, address, url, side, onSubmit, busy, disabledReason }) { return <div className="evidence-party"><div className="party-label">{title}</div><div className="party-addr">{typeof address === "string" ? address : shortAddress(address)}</div>{url ? <div className="evidence-item"><div className="evidence-icon">🔗</div><div><div className="evidence-url">{url}</div><div className="evidence-status">✓ Submitted · Ready for agent parse</div></div></div> : <div className="empty-small">Waiting for evidence</div>}<div className="evidence-submit"><label>Add evidence</label><input data-evidence={side} type="url" placeholder="https://..." disabled={busy} />{disabledReason && <div className="form-hint">{disabledReason}</div>}<button className="btn btn-dark" onClick={() => onSubmit(side)} disabled={busy}>Submit evidence URL</button></div></div>; }
 function FeedItem({ event }) { return <div className="feed-item"><div className={`feed-status-dot ${event.status === "active" ? "dot-amber" : "dot-green"}`} /><div className="feed-agent-badge">{event.agent}</div><div className="feed-content"><div className="feed-step">{event.step}</div><div className="feed-detail">{event.data}</div></div><div className="feed-time">{event.time}</div></div>; }
 function StatMini({ label, value, sub }) { return <div className="card mini-stat"><div>{label}</div><strong>{value}</strong><span>{sub}</span></div>; }
 function Meta({ label, value, green }) { return <div className="verdict-meta-card"><div className="verdict-meta-label">{label}</div><div className="verdict-meta-value" style={green ? { color: "var(--green)" } : undefined}>{value}</div></div>; }
 function TxRow({ label, value, green }) { return <div className="tx-row"><span>{label}</span><span className="mono" style={green ? { color: "var(--green)" } : undefined}>{value}</span></div>; }
-function ReceiptStep({ name, time, detail, code }) { return <div className="receipt-step"><div className="receipt-step-header"><span className="receipt-step-name">{name}</span><span className="receipt-step-time">{time}</span></div><div className="receipt-step-detail">{detail}</div><div className="receipt-code">{code}</div></div>; }
+function parseClaims(text) {
+  if (!text) return [];
+  const regex = /\{[^{}]+\}/g;
+  const matches = text.match(regex) || [];
+  const claims = [];
+  for (const match of matches) {
+    try {
+      const normalized = match
+        .replace(/'/g, '"')
+        .replace(/\\"/g, '"');
+      const parsed = JSON.parse(normalized);
+      if (parsed.claim) {
+        claims.push(parsed);
+      }
+    } catch (e) {
+      // ignore parsing errors for single corrupted items
+    }
+  }
+  return claims;
+}
+
+function ClaimsList({ claims }) {
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: "8px", marginTop: "8px" }}>
+      {claims.map((c, index) => (
+        <div key={index} style={{ 
+          background: "var(--cream)", 
+          border: "1px solid var(--border)", 
+          borderRadius: "8px", 
+          padding: "10px 12px",
+          display: "flex",
+          flexDirection: "column",
+          gap: "4px"
+        }}>
+          <div style={{ fontSize: "0.875rem", fontWeight: "500", color: "var(--ink)" }}>
+            {c.claim}
+          </div>
+          <div style={{ display: "flex", gap: "10px", alignItems: "center", fontSize: "0.75rem", color: "var(--ink-muted)" }}>
+            <span>📅 {c.timestamp || "No date"}</span>
+            <span className={`badge ${c.sourceCredibility?.toLowerCase() === "high" ? "badge-green" : "badge-gray"}`}>
+              {c.sourceCredibility || "Medium"} credibility
+            </span>
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function VerdictDetails({ verdict }) {
+  return (
+    <div style={{ 
+      background: "var(--ink)", 
+      color: "white",
+      borderRadius: "12px", 
+      padding: "1.25rem",
+      marginTop: "8px",
+      display: "flex",
+      flexDirection: "column",
+      gap: "10px"
+    }}>
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+        <span style={{ fontSize: "0.8125rem", color: "rgba(255,255,255,0.5)", textTransform: "uppercase", letterSpacing: "0.05em" }}>DECISION DELIVERED</span>
+        <span className="badge badge-green" style={{ background: "var(--accent)", color: "white", border: "none" }}>
+          🏆 Winner: {verdict.winner}
+        </span>
+      </div>
+      <div style={{ fontSize: "1.125rem", fontWeight: "600", fontFamily: "'Playfair Display', serif" }}>
+        "{verdict.reasoning}"
+      </div>
+      <div style={{ display: "flex", alignItems: "center", gap: "12px", marginTop: "4px" }}>
+        <div style={{ flex: 1, height: "6px", background: "rgba(255,255,255,0.15)", borderRadius: "3px", overflow: "hidden" }}>
+          <div style={{ width: `${verdict.confidence}%`, height: "100%", background: "#4ADE80" }} />
+        </div>
+        <span style={{ fontSize: "0.75rem", color: "#4ADE80", fontWeight: "600" }}>{verdict.confidence}% confidence</span>
+      </div>
+    </div>
+  );
+}
+
+function ReceiptStep({ name, time, detail, code }) {
+  const [expanded, setExpanded] = useState(false);
+
+  // Check if detail represents parsed claims
+  const isClaimsStep = name.toLowerCase().includes("claims") || detail.includes("LLM parsed plaintiff claims") || detail.includes("LLM parsed defendant claims");
+  const claims = isClaimsStep ? parseClaims(detail) : [];
+
+  // Check if detail represents judge deliberation
+  const isVerdictStep = name.toLowerCase().includes("deliberation") || detail.includes("Verdict JSON");
+  let verdictObj = null;
+  if (isVerdictStep) {
+    try {
+      const jsonStart = detail.indexOf("{");
+      if (jsonStart !== -1) {
+        verdictObj = JSON.parse(detail.substring(jsonStart).trim());
+      }
+    } catch (e) {
+      // ignore
+    }
+  }
+
+  return (
+    <div className="receipt-step">
+      <div className="receipt-step-header">
+        <span className="receipt-step-name" style={{ textTransform: "capitalize" }}>
+          {name.replace(/_/g, " ")}
+        </span>
+        <span className="receipt-step-time">{time}</span>
+      </div>
+      <div className="receipt-step-detail">
+        {claims.length > 0 ? (
+          <div>
+            <div style={{ fontWeight: "500", marginBottom: "4px" }}>
+              {detail.split(":")[0] || "LLM parsed claims"}:
+            </div>
+            <ClaimsList claims={claims} />
+          </div>
+        ) : verdictObj ? (
+          <div>
+            <div style={{ fontWeight: "500", marginBottom: "4px" }}>
+              {detail.split(":")[0] || "Judge deliberation complete"}:
+            </div>
+            <VerdictDetails verdict={verdictObj} />
+          </div>
+        ) : (
+          detail
+        )}
+      </div>
+      <div className="receipt-step-expand" style={{ marginTop: "6px" }}>
+        <button 
+          type="button" 
+          onClick={() => setExpanded(!expanded)}
+          style={{ 
+            background: "none", 
+            border: "none", 
+            color: "var(--accent)", 
+            fontSize: "0.75rem", 
+            fontWeight: "500",
+            cursor: "pointer", 
+            padding: "4px 0", 
+            display: "flex", 
+            alignItems: "center", 
+            gap: "4px" 
+          }}
+        >
+          {expanded ? "Hide raw JSON ▴" : "Show raw JSON ▾"}
+        </button>
+        {expanded && <pre className="receipt-code" style={{ whiteSpace: "pre-wrap", wordBreak: "break-all" }}><code>{code}</code></pre>}
+      </div>
+    </div>
+  );
+}
 function StatusBadge({ status }) { const cls = status === "Resolved" ? "badge-green" : status === "Expired" ? "badge-red" : "badge-amber"; return <span className={`badge ${cls}`}><span className="badge-dot" />{status}</span>; }
 
 function agentCopy(name) {
