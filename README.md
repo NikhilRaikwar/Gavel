@@ -11,6 +11,7 @@
 Gavel is an onchain dispute resolution app for Somnia testnet. Two parties stake equal value into escrow, submit evidence, and let deterministic Somnia agents decide the outcome on-chain.
 
 - **Presentation Deck**: [Gavel Slide Deck Presentation](https://gavel-nine.vercel.app/gavel-slides)
+- **Demo Video**: [Watch on YouTube](https://youtu.be/bglHEuVNnBA)
 
 The project uses:
 - Somnia Agents for evidence extraction and verdict inference
