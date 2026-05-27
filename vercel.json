@@ -1,0 +1,7 @@
+{
+  "cleanUrls": true,
+  "rewrites": [
+    { "source": "/gavel-slides", "destination": "/gavel-slides.html" },
+    { "source": "/((?!gavel-slides|favicon|robots|sitemap|assets).*)", "destination": "/index.html" }
+  ]
+}

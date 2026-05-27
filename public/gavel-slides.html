@@ -1,0 +1,1471 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Gavel — Onchain AI Court on Somnia</title>
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=Playfair+Display:ital,wght@0,600;0,700;1,600&family=DM+Mono:wght@400;500&family=DM+Sans:wght@300;400;500&display=swap" rel="stylesheet" />
+<style>
+  :root {
+    --ink: #1A1814;
+    --ink2: #2D2A24;
+    --cream: #FAF8F4;
+    --cream2: #F2EDE4;
+    --accent: #C84B2F;
+    --accent2: #E8603E;
+    --green: #2D7A47;
+    --green-bg: #E6F4EA;
+    --border: #E2DDD4;
+    --muted: #8C897F;
+    --soft: #4A4640;
+    --white: #FFFFFF;
+    --purple: #7C3AED;
+    --blue: #0EA5E9;
+    --orange: #F97316;
+  }
+
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  html, body {
+    width: 100%; height: 100%;
+    overflow: hidden;
+    font-family: 'DM Sans', sans-serif;
+    background: var(--ink);
+    cursor: default;
+    user-select: none;
+  }
+
+  /* ——— DECK SHELL ——— */
+  #deck {
+    width: 100vw; height: 100vh;
+    position: relative;
+    overflow: hidden;
+  }
+
+  /* ——— SLIDES ——— */
+  .slide {
+    position: absolute;
+    inset: 0;
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity 0s;
+  }
+  .slide.active {
+    opacity: 1;
+    pointer-events: all;
+  }
+  .slide.entering { animation: slideEnter 0.65s cubic-bezier(.22,1,.36,1) both; }
+  .slide.leaving  { animation: slideLeave 0.45s cubic-bezier(.55,0,1,.45) both; }
+
+  @keyframes slideEnter {
+    from { opacity: 0; transform: translateY(32px) scale(0.985); }
+    to   { opacity: 1; transform: translateY(0) scale(1); }
+  }
+  @keyframes slideLeave {
+    from { opacity: 1; transform: translateY(0) scale(1); }
+    to   { opacity: 0; transform: translateY(-24px) scale(1.015); }
+  }
+
+  /* ——— STAGGER HELPERS ——— */
+  [data-reveal] {
+    opacity: 0;
+    transform: translateY(22px);
+    transition: opacity 0.55s ease, transform 0.55s cubic-bezier(.22,1,.36,1);
+  }
+  .slide.active [data-reveal] { opacity: 1; transform: translateY(0); }
+  .slide.active [data-reveal="1"] { transition-delay: 0.08s; }
+  .slide.active [data-reveal="2"] { transition-delay: 0.18s; }
+  .slide.active [data-reveal="3"] { transition-delay: 0.28s; }
+  .slide.active [data-reveal="4"] { transition-delay: 0.38s; }
+  .slide.active [data-reveal="5"] { transition-delay: 0.48s; }
+  .slide.active [data-reveal="6"] { transition-delay: 0.58s; }
+  .slide.active [data-reveal="7"] { transition-delay: 0.68s; }
+  .slide.active [data-reveal="8"] { transition-delay: 0.78s; }
+
+  [data-from="left"] { transform: translateX(-28px); }
+  [data-from="right"] { transform: translateX(28px); }
+  .slide.active [data-from="left"],
+  .slide.active [data-from="right"] { transform: translateX(0); }
+
+  /* ——— NAV ——— */
+  #nav {
+    position: fixed;
+    bottom: 2rem;
+    left: 50%;
+    transform: translateX(-50%);
+    z-index: 1000;
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    background: rgba(26,24,20,0.85);
+    border: 1px solid rgba(255,255,255,0.1);
+    border-radius: 100px;
+    padding: 0.55rem 1.2rem;
+    backdrop-filter: blur(12px);
+  }
+
+  #nav button {
+    background: none;
+    border: none;
+    color: rgba(250,248,244,0.5);
+    font-size: 0.75rem;
+    cursor: pointer;
+    padding: 0.25rem 0.5rem;
+    border-radius: 6px;
+    transition: color 0.2s, background 0.2s;
+    font-family: 'DM Mono', monospace;
+    letter-spacing: 0.04em;
+  }
+  #nav button:hover { color: var(--cream); background: rgba(255,255,255,0.08); }
+  #nav button.prev-btn, #nav button.next-btn {
+    font-size: 1rem;
+    padding: 0.2rem 0.6rem;
+  }
+
+  #slide-counter {
+    font-family: 'DM Mono', monospace;
+    font-size: 0.7rem;
+    color: rgba(250,248,244,0.35);
+    min-width: 40px;
+    text-align: center;
+  }
+
+  .dot-nav { display: flex; gap: 6px; align-items: center; }
+  .dot {
+    width: 5px; height: 5px; border-radius: 50%;
+    background: rgba(250,248,244,0.2);
+    cursor: pointer;
+    transition: background 0.2s, transform 0.2s;
+  }
+  .dot.active { background: var(--accent); transform: scale(1.4); }
+
+  #fullscreen-btn {
+    color: rgba(250,248,244,0.4);
+    font-size: 0.8rem;
+    padding: 0.2rem 0.5rem;
+  }
+
+  /* ——— KEYBOARD HINT ——— */
+  #key-hint {
+    position: fixed;
+    top: 1.5rem;
+    right: 1.5rem;
+    font-family: 'DM Mono', monospace;
+    font-size: 0.65rem;
+    color: rgba(250,248,244,0.2);
+    z-index: 999;
+    pointer-events: none;
+    letter-spacing: 0.04em;
+  }
+
+  /* ════════════════════════════════════════
+     SLIDE 1 — COVER  (dark)
+  ════════════════════════════════════════ */
+  #s1 { background: var(--ink); }
+
+  .s1-accent-bar {
+    position: absolute;
+    left: 0; top: 0; bottom: 0;
+    width: 5px;
+    background: var(--accent);
+  }
+
+  .s1-right {
+    position: absolute;
+    right: 0; top: 0; bottom: 0;
+    width: 38%;
+    background: #201D18;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 1.5rem;
+  }
+
+  .s1-logo-big {
+    width: 140px; height: 140px;
+    background: var(--ink);
+    border-radius: 28px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border: 1.5px solid rgba(255,255,255,0.08);
+  }
+
+  .s1-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 7px;
+    background: var(--green-bg);
+    border: 1px solid var(--green);
+    border-radius: 100px;
+    padding: 6px 16px;
+    font-size: 0.7rem;
+    font-weight: 500;
+    color: var(--green);
+    letter-spacing: 0.03em;
+  }
+
+  .s1-badge .pulse-dot {
+    width: 6px; height: 6px; border-radius: 50%;
+    background: var(--green);
+    animation: pulse 2s infinite;
+  }
+  @keyframes pulse { 0%,100%{opacity:1;transform:scale(1)} 50%{opacity:.4;transform:scale(.85)} }
+
+  .s1-left {
+    position: absolute;
+    left: 5%;
+    top: 50%;
+    transform: translateY(-50%);
+    width: 55%;
+  }
+
+  .s1-eyebrow {
+    font-family: 'DM Mono', monospace;
+    font-size: 0.65rem;
+    color: var(--accent);
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    margin-bottom: 1.2rem;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .s1-eyebrow::before {
+    content: '';
+    display: block;
+    width: 28px; height: 1.5px;
+    background: var(--accent);
+  }
+
+  .s1-title {
+    font-family: 'Playfair Display', serif;
+    font-size: clamp(3.5rem, 7vw, 5.5rem);
+    font-weight: 700;
+    color: var(--cream);
+    line-height: 1.0;
+    margin-bottom: 0.8rem;
+  }
+
+  .s1-sub {
+    font-family: 'Playfair Display', serif;
+    font-size: clamp(1.1rem, 2.2vw, 1.5rem);
+    color: var(--accent);
+    font-style: italic;
+    margin-bottom: 1.5rem;
+  }
+
+  .s1-desc {
+    font-size: 0.95rem;
+    color: rgba(250,248,244,0.55);
+    line-height: 1.7;
+    max-width: 420px;
+    margin-bottom: 2.5rem;
+  }
+
+  .s1-stats {
+    display: flex;
+    gap: 2.5rem;
+    border-top: 1px solid rgba(255,255,255,0.07);
+    padding-top: 1.5rem;
+  }
+
+  .s1-stat-num {
+    font-family: 'Playfair Display', serif;
+    font-size: 1.75rem;
+    font-weight: 700;
+    color: var(--cream);
+    display: block;
+  }
+  .s1-stat-lbl {
+    font-size: 0.72rem;
+    color: var(--muted);
+    margin-top: 2px;
+  }
+
+  /* GAVEL SVG */
+  .gavel-svg { width: 90px; height: 90px; }
+
+  /* ════════════════════════════════════════
+     SLIDE 2 — PROBLEM  (light)
+  ════════════════════════════════════════ */
+  #s2 { background: var(--cream); }
+
+  .slide-topbar {
+    position: absolute;
+    top: 0; left: 0; right: 0;
+    height: 58px;
+    background: var(--ink);
+    display: flex;
+    align-items: center;
+    padding: 0 2.5rem;
+    justify-content: space-between;
+  }
+
+  .topbar-logo {
+    display: flex;
+    align-items: center;
+    gap: 9px;
+    font-family: 'Playfair Display', serif;
+    font-size: 1.1rem;
+    font-weight: 700;
+    color: var(--cream);
+  }
+
+  .topbar-label {
+    font-family: 'DM Mono', monospace;
+    font-size: 0.6rem;
+    color: var(--muted);
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+  }
+
+  .slide-content {
+    position: absolute;
+    top: 74px; left: 0; right: 0; bottom: 0;
+    padding: 1.5rem 3rem 1rem;
+    display: flex;
+    flex-direction: column;
+  }
+
+  .section-eyebrow {
+    font-family: 'DM Mono', monospace;
+    font-size: 0.62rem;
+    color: var(--accent);
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    margin-bottom: 0.6rem;
+  }
+
+  .slide-title {
+    font-family: 'Playfair Display', serif;
+    font-size: clamp(1.8rem, 3.5vw, 2.6rem);
+    font-weight: 700;
+    color: var(--ink);
+    line-height: 1.15;
+    margin-bottom: 0.5rem;
+  }
+
+  .slide-title.light { color: var(--cream); }
+
+  .cards-row {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 1.2rem;
+    flex: 1;
+    align-content: center;
+    margin-top: 1.2rem;
+  }
+
+  .problem-card {
+    background: var(--white);
+    border: 1px solid var(--border);
+    border-radius: 14px;
+    padding: 1.4rem 1.5rem;
+    display: flex;
+    flex-direction: column;
+    gap: 0.75rem;
+    transition: transform 0.25s ease, box-shadow 0.25s ease;
+  }
+  .problem-card:hover {
+    transform: translateY(-3px);
+    box-shadow: 0 12px 32px rgba(26,24,20,0.07);
+  }
+
+  .card-icon { font-size: 1.5rem; }
+  .card-title { font-family: 'Playfair Display', serif; font-size: 1.05rem; font-weight: 600; color: var(--ink); }
+  .card-body { font-size: 0.84rem; color: var(--soft); line-height: 1.65; }
+
+  .pullquote {
+    background: #FFF3F0;
+    border: 1px solid #E8C4BA;
+    border-radius: 12px;
+    padding: 1rem 1.5rem;
+    margin-top: auto;
+    margin-bottom: 0.3rem;
+  }
+  .pullquote p {
+    font-family: 'Playfair Display', serif;
+    font-size: 0.95rem;
+    color: var(--accent);
+    font-style: italic;
+    line-height: 1.6;
+  }
+
+  /* ════════════════════════════════════════
+     SLIDE 3 — SOLUTION  (dark split)
+  ════════════════════════════════════════ */
+  #s3 { background: var(--ink); }
+
+  .split-left {
+    position: absolute;
+    left: 0; top: 0; bottom: 0;
+    width: 42%;
+    padding: 3rem 2.5rem;
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    border-right: 1px solid rgba(255,255,255,0.05);
+  }
+
+  .split-right {
+    position: absolute;
+    right: 0; top: 0; bottom: 0;
+    width: 58%;
+    padding: 2.5rem;
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    gap: 0.85rem;
+  }
+
+  .s3-eyebrow {
+    font-family: 'DM Mono', monospace;
+    font-size: 0.6rem;
+    color: var(--muted);
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    margin-bottom: 0.7rem;
+  }
+
+  .feature-tag {
+    background: rgba(255,255,255,0.04);
+    border: 1px solid rgba(255,255,255,0.07);
+    border-radius: 8px;
+    padding: 0.6rem 1rem;
+    font-size: 0.85rem;
+    color: rgba(250,248,244,0.7);
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .feature-tag .chk { color: var(--accent); font-size: 0.9rem; }
+
+  .step-row {
+    display: flex;
+    align-items: stretch;
+    background: rgba(255,255,255,0.03);
+    border: 1px solid rgba(255,255,255,0.06);
+    border-radius: 12px;
+    overflow: hidden;
+    transition: border-color 0.25s;
+  }
+  .step-row:hover { border-color: rgba(200,75,47,0.4); }
+
+  .step-num {
+    background: var(--accent);
+    color: white;
+    font-family: 'DM Mono', monospace;
+    font-size: 0.85rem;
+    font-weight: 500;
+    width: 46px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex-shrink: 0;
+  }
+
+  .step-content { padding: 0.8rem 1.1rem; }
+  .step-title { font-family: 'Playfair Display', serif; font-size: 0.95rem; font-weight: 600; color: var(--cream); margin-bottom: 3px; }
+  .step-desc { font-size: 0.78rem; color: rgba(250,248,244,0.45); line-height: 1.55; }
+
+  /* ════════════════════════════════════════
+     SLIDE 4 — SOMNIA INTEGRATION  (light)
+  ════════════════════════════════════════ */
+  #s4 { background: var(--cream); }
+
+  .agents-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 1rem;
+    margin-top: 1rem;
+    flex: 1;
+  }
+
+  .agent-card {
+    background: var(--white);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    overflow: hidden;
+    transition: transform 0.2s, box-shadow 0.2s;
+  }
+  .agent-card:hover { transform: translateY(-3px); box-shadow: 0 10px 28px rgba(26,24,20,0.07); }
+
+  .agent-header {
+    padding: 0.55rem 1rem;
+    font-family: 'DM Mono', monospace;
+    font-size: 0.68rem;
+    font-weight: 500;
+  }
+
+  .agent-body { padding: 0.75rem 1rem 1rem; }
+  .agent-name { font-family: 'Playfair Display', serif; font-size: 1rem; font-weight: 600; color: var(--ink); margin-bottom: 3px; }
+  .agent-id { font-family: 'DM Mono', monospace; font-size: 0.68rem; color: var(--muted); margin-bottom: 0.5rem; }
+  .agent-desc { font-size: 0.8rem; color: var(--soft); line-height: 1.6; }
+
+  .contract-bar {
+    position: absolute;
+    bottom: 3.5rem;
+    left: 3rem; right: 3rem;
+    background: #FFF3F0;
+    border: 1px solid #E8C4BA;
+    border-radius: 8px;
+    padding: 0.55rem 1rem;
+    font-family: 'DM Mono', monospace;
+    font-size: 0.68rem;
+    color: var(--accent);
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+
+  /* ════════════════════════════════════════
+     SLIDE 5 — ARCHITECTURE  (dark)
+  ════════════════════════════════════════ */
+  #s5 { background: var(--ink); }
+
+  .pipeline {
+    display: flex;
+    align-items: center;
+    gap: 0;
+    margin-bottom: 1.5rem;
+  }
+
+  .pipe-node {
+    flex: 1;
+    border-radius: 10px;
+    padding: 0.7rem 0.5rem;
+    text-align: center;
+    font-family: 'Playfair Display', serif;
+    font-size: 0.78rem;
+    font-weight: 600;
+    line-height: 1.4;
+    border: 1.5px solid;
+    transition: transform 0.2s;
+  }
+  .pipe-node:hover { transform: translateY(-3px); }
+
+  .pipe-arrow {
+    font-size: 0.8rem;
+    color: rgba(255,255,255,0.2);
+    padding: 0 0.3rem;
+    flex-shrink: 0;
+  }
+
+  .arch-bottom {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 1.5rem;
+    flex: 1;
+  }
+
+  .arch-section-title {
+    font-family: 'Playfair Display', serif;
+    font-size: 0.9rem;
+    font-weight: 600;
+    color: var(--cream);
+    margin-bottom: 0.8rem;
+  }
+
+  .stage-row {
+    background: rgba(255,255,255,0.03);
+    border: 1px solid rgba(255,255,255,0.06);
+    border-radius: 9px;
+    overflow: hidden;
+    display: flex;
+    align-items: stretch;
+    margin-bottom: 0.6rem;
+  }
+
+  .stage-accent {
+    width: 5px;
+    flex-shrink: 0;
+  }
+
+  .stage-body { padding: 0.5rem 0.9rem; flex: 1; }
+  .stage-name { font-family: 'DM Mono', monospace; font-size: 0.72rem; font-weight: 500; color: var(--cream); }
+  .stage-agent { font-size: 0.7rem; color: var(--muted); margin-top: 2px; }
+
+  .stage-cost {
+    padding: 0.5rem 0.9rem;
+    font-family: 'DM Mono', monospace;
+    font-size: 0.78rem;
+    font-weight: 500;
+    color: #4ADE80;
+    display: flex;
+    align-items: center;
+  }
+
+  .stack-item {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 0.5rem 0;
+    border-bottom: 1px solid rgba(255,255,255,0.04);
+    font-size: 0.82rem;
+    color: rgba(250,248,244,0.55);
+  }
+  .stack-item:last-child { border-bottom: none; }
+  .stack-dot {
+    width: 6px; height: 6px;
+    border-radius: 50%;
+    background: var(--accent);
+    flex-shrink: 0;
+  }
+
+  .budget-bar-dark {
+    position: absolute;
+    bottom: 3.5rem;
+    left: 3rem; right: 3rem;
+    background: rgba(45,122,71,0.12);
+    border: 1px solid rgba(45,122,71,0.3);
+    border-radius: 8px;
+    padding: 0.5rem 1rem;
+    font-family: 'DM Mono', monospace;
+    font-size: 0.68rem;
+    color: #4ADE80;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+
+  /* ════════════════════════════════════════
+     SLIDE 6 — AI JURY  (light)
+  ════════════════════════════════════════ */
+  #s6 { background: var(--cream); }
+
+  .jury-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 1.1rem;
+    flex: 1;
+    margin-top: 1rem;
+  }
+
+  .jury-card {
+    background: var(--white);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    overflow: hidden;
+    transition: transform 0.2s, box-shadow 0.2s;
+  }
+  .jury-card:hover { transform: translateY(-3px); box-shadow: 0 10px 28px rgba(26,24,20,0.07); }
+
+  .jury-top-bar { height: 5px; }
+  .jury-body { padding: 1rem 1.1rem 1.1rem; }
+
+  .jury-badge {
+    display: inline-flex;
+    align-items: center;
+    padding: 2px 8px;
+    border-radius: 5px;
+    font-family: 'DM Mono', monospace;
+    font-size: 0.6rem;
+    font-weight: 500;
+    margin-bottom: 0.5rem;
+    border: 1px solid;
+  }
+
+  .jury-name {
+    font-family: 'Playfair Display', serif;
+    font-size: 1rem;
+    font-weight: 600;
+    color: var(--ink);
+    margin-bottom: 0.5rem;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+
+  .jury-desc { font-size: 0.8rem; color: var(--soft); line-height: 1.65; }
+
+  /* ════════════════════════════════════════
+     SLIDE 7 — USE CASES  (dark)
+  ════════════════════════════════════════ */
+  #s7 { background: var(--ink); }
+
+  .usecases-grid {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 1rem;
+    flex: 1;
+    margin-top: 1rem;
+    align-content: start;
+  }
+
+  .uc-card {
+    background: rgba(255,255,255,0.03);
+    border: 1px solid rgba(255,255,255,0.06);
+    border-radius: 12px;
+    padding: 1.2rem;
+    transition: background 0.2s, border-color 0.2s, transform 0.2s;
+  }
+  .uc-card:hover {
+    background: rgba(255,255,255,0.06);
+    border-color: rgba(200,75,47,0.35);
+    transform: translateY(-3px);
+  }
+
+  .uc-icon { font-size: 1.4rem; margin-bottom: 0.6rem; }
+  .uc-title { font-family: 'Playfair Display', serif; font-size: 0.95rem; font-weight: 600; color: var(--cream); margin-bottom: 0.4rem; }
+  .uc-tag { font-family: 'DM Mono', monospace; font-size: 0.62rem; color: var(--accent); margin-bottom: 0.5rem; }
+  .uc-desc { font-size: 0.78rem; color: rgba(250,248,244,0.45); line-height: 1.6; }
+
+  /* ════════════════════════════════════════
+     SLIDE 8 — DEMO & LINKS  (light)
+  ════════════════════════════════════════ */
+  #s8 { background: var(--cream); }
+
+  .demo-layout {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 2rem;
+    flex: 1;
+    margin-top: 1rem;
+  }
+
+  .demo-section-title {
+    font-family: 'Playfair Display', serif;
+    font-size: 0.95rem;
+    font-weight: 600;
+    color: var(--ink);
+    margin-bottom: 0.8rem;
+  }
+
+  .demo-step {
+    display: flex;
+    align-items: flex-start;
+    gap: 10px;
+    margin-bottom: 0.65rem;
+  }
+
+  .demo-num {
+    background: var(--accent);
+    color: white;
+    font-family: 'DM Mono', monospace;
+    font-size: 0.65rem;
+    font-weight: 500;
+    width: 22px; height: 22px;
+    border-radius: 50%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex-shrink: 0;
+    margin-top: 1px;
+  }
+
+  .demo-text { font-size: 0.82rem; color: var(--soft); line-height: 1.6; }
+
+  .link-card {
+    background: var(--white);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 0.75rem 1rem;
+    margin-bottom: 0.6rem;
+    transition: border-color 0.2s, transform 0.2s;
+    text-decoration: none;
+    display: block;
+  }
+  .link-card:hover { border-color: var(--accent); transform: translateX(4px); }
+
+  .link-label { font-family: 'DM Mono', monospace; font-size: 0.65rem; font-weight: 500; margin-bottom: 3px; }
+  .link-val { font-family: 'DM Mono', monospace; font-size: 0.72rem; color: var(--soft); }
+
+  /* ════════════════════════════════════════
+     SLIDE 9 — CLOSING  (dark)
+  ════════════════════════════════════════ */
+  #s9 {
+    background: var(--ink);
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    text-align: center;
+  }
+
+  .s9-logo {
+    width: 110px; height: 110px;
+    background: #221F1A;
+    border-radius: 24px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border: 1.5px solid rgba(255,255,255,0.08);
+    margin-bottom: 2rem;
+    animation: float 4s ease-in-out infinite;
+  }
+  @keyframes float {
+    0%,100%{transform:translateY(0)}
+    50%{transform:translateY(-8px)}
+  }
+
+  .s9-title {
+    font-family: 'Playfair Display', serif;
+    font-size: clamp(3rem, 6vw, 5rem);
+    font-weight: 700;
+    color: var(--cream);
+    margin-bottom: 0.75rem;
+  }
+
+  .s9-sub {
+    font-family: 'Playfair Display', serif;
+    font-size: clamp(1rem, 2vw, 1.35rem);
+    color: var(--accent);
+    font-style: italic;
+    margin-bottom: 2rem;
+  }
+
+  .s9-links {
+    display: flex;
+    gap: 1rem;
+    justify-content: center;
+    flex-wrap: wrap;
+    margin-bottom: 2.5rem;
+  }
+
+  .s9-link {
+    display: inline-flex;
+    align-items: center;
+    gap: 7px;
+    padding: 10px 20px;
+    border-radius: 8px;
+    font-family: 'DM Mono', monospace;
+    font-size: 0.72rem;
+    font-weight: 500;
+    text-decoration: none;
+    transition: transform 0.2s, background 0.2s;
+  }
+  .s9-link:hover { transform: translateY(-2px); }
+  .s9-link.primary { background: var(--accent); color: white; }
+  .s9-link.secondary { background: rgba(255,255,255,0.06); color: rgba(250,248,244,0.7); border: 1px solid rgba(255,255,255,0.1); }
+  .s9-link.secondary:hover { background: rgba(255,255,255,0.1); color: var(--cream); }
+
+  .s9-credit {
+    font-family: 'DM Mono', monospace;
+    font-size: 0.65rem;
+    color: var(--muted);
+    letter-spacing: 0.06em;
+  }
+
+  /* accent line bar for light slides */
+  .slide-accent-left {
+    position: absolute;
+    left: 0; top: 0; bottom: 0;
+    width: 4px;
+    background: var(--accent);
+  }
+
+  /* progress bar */
+  #progress {
+    position: fixed;
+    top: 0; left: 0;
+    height: 2.5px;
+    background: var(--accent);
+    z-index: 9999;
+    transition: width 0.4s cubic-bezier(.22,1,.36,1);
+  }
+
+  /* logo mini SVG */
+  .logo-mini {
+    width: 22px; height: 22px;
+    flex-shrink: 0;
+  }
+  .logo-mini-light {
+    width: 20px; height: 20px;
+    flex-shrink: 0;
+  }
+</style>
+</head>
+<body>
+
+<div id="progress"></div>
+
+<!-- ═══════════════ SLIDE 1 — COVER ═══════════════ -->
+<div class="slide active" id="s1">
+  <div class="s1-accent-bar"></div>
+
+  <div class="s1-left">
+    <div class="s1-eyebrow" data-reveal="1">Somnia Agentathon 2026</div>
+    <div class="s1-title" data-reveal="2">Gavel</div>
+    <div class="s1-sub" data-reveal="3">The Onchain AI Court</div>
+    <div class="s1-desc" data-reveal="4">
+      Autonomous dispute resolution powered by Somnia agents, smart contracts &amp; audit receipts. No lawyers. No oracles. No off-chain servers.
+    </div>
+    <div class="s1-stats" data-reveal="5">
+      <div>
+        <span class="s1-stat-num">1</span>
+        <span class="s1-stat-lbl">Escrow contract</span>
+      </div>
+      <div>
+        <span class="s1-stat-num">3</span>
+        <span class="s1-stat-lbl">Live Somnia agents</span>
+      </div>
+      <div>
+        <span class="s1-stat-num">100%</span>
+        <span class="s1-stat-lbl">On-chain receipts</span>
+      </div>
+    </div>
+  </div>
+
+  <div class="s1-right" data-reveal="6">
+    <div class="s1-logo-big">
+      <svg class="gavel-svg" viewBox="0 0 64 64" fill="none" xmlns="http://www.w3.org/2000/svg">
+        <rect width="64" height="64" rx="14" fill="#1A1814"/>
+        <path d="M23 15 15 23l20 20 8-8L23 15Zm-8 34 13-13 4 4-13 13H15v-4Zm26-31 5 5-8 8-5-5 8-8Z" fill="#FAF8F4"/>
+        <circle cx="49" cy="49" r="5" fill="#C84B2F"/>
+      </svg>
+    </div>
+    <div class="s1-badge" data-reveal="7">
+      <span class="pulse-dot"></span>
+      Live on Somnia Testnet
+    </div>
+    <div style="font-family:'DM Mono',monospace;font-size:0.62rem;color:var(--muted);text-align:center;padding:0 2rem;line-height:1.6;" data-reveal="8">
+      Chain ID 50312<br/>0xdc9A2ea119…138f6c5
+    </div>
+  </div>
+</div>
+
+<!-- ═══════════════ SLIDE 2 — PROBLEM ═══════════════ -->
+<div class="slide" id="s2">
+  <div class="slide-accent-left"></div>
+  <div class="slide-topbar">
+    <div class="topbar-logo">
+      <svg class="logo-mini" viewBox="0 0 64 64" fill="none" xmlns="http://www.w3.org/2000/svg">
+        <rect width="64" height="64" rx="14" fill="#1A1814"/>
+        <path d="M23 15 15 23l20 20 8-8L23 15Zm-8 34 13-13 4 4-13 13H15v-4Zm26-31 5 5-8 8-5-5 8-8Z" fill="#FAF8F4"/>
+        <circle cx="49" cy="49" r="5" fill="#C84B2F"/>
+      </svg>
+      Gavel
+    </div>
+    <span class="topbar-label">The Problem</span>
+  </div>
+
+  <div class="slide-content">
+    <div data-reveal="1">
+      <div class="section-eyebrow">Why Gavel exists</div>
+      <div class="slide-title">Disputes are slow,<br/>expensive, and unverifiable.</div>
+    </div>
+
+    <div class="cards-row">
+      <div class="problem-card" data-reveal="2">
+        <div class="card-icon">⏳</div>
+        <div class="card-title">Time-consuming</div>
+        <div class="card-body">Disputes drag on for weeks or months waiting for human arbitrators to review evidence.</div>
+      </div>
+      <div class="problem-card" data-reveal="3">
+        <div class="card-icon">💸</div>
+        <div class="card-title">Expensive</div>
+        <div class="card-body">Legal fees, escrow agents, and arbitration costs eat into the disputed value substantially.</div>
+      </div>
+      <div class="problem-card" data-reveal="4">
+        <div class="card-icon">🔒</div>
+        <div class="card-title">Off-chain &amp; opaque</div>
+        <div class="card-body">Evidence lives in emails and DMs — no verifiable, tamper-proof audit trail exists.</div>
+      </div>
+    </div>
+
+    <div class="pullquote" data-reveal="5">
+      <p>"Traditional escrow requires a human arbiter — someone users must blindly trust."</p>
+    </div>
+  </div>
+</div>
+
+<!-- ═══════════════ SLIDE 3 — SOLUTION ═══════════════ -->
+<div class="slide" id="s3">
+  <div class="split-left">
+    <div class="s3-eyebrow" data-reveal="1">The Solution</div>
+    <div style="font-family:'Playfair Display',serif;font-size:clamp(1.6rem,3vw,2.2rem);font-weight:700;color:var(--cream);line-height:1.15;margin-bottom:0.8rem;" data-reveal="2">
+      Gavel turns dispute resolution into an on-chain workflow.
+    </div>
+    <div style="font-family:'Playfair Display',serif;font-size:1rem;color:var(--accent);font-style:italic;margin-bottom:1.8rem;" data-reveal="3">
+      No lawyers. No oracles. No off-chain servers.
+    </div>
+    <div style="display:flex;flex-direction:column;gap:0.5rem;">
+      <div class="feature-tag" data-reveal="4"><span class="chk">✓</span> Smart contract escrow</div>
+      <div class="feature-tag" data-reveal="5"><span class="chk">✓</span> Somnia AI agents</div>
+      <div class="feature-tag" data-reveal="6"><span class="chk">✓</span> 100% on-chain receipts</div>
+      <div class="feature-tag" data-reveal="7"><span class="chk">✓</span> Automatic fund release</div>
+    </div>
+  </div>
+
+  <div class="split-right">
+    <div style="font-family:'DM Mono',monospace;font-size:0.6rem;color:var(--muted);letter-spacing:0.1em;text-transform:uppercase;margin-bottom:0.5rem;" data-reveal="1">
+      How it works
+    </div>
+    <div class="step-row" data-reveal="2">
+      <div class="step-num">01</div>
+      <div class="step-content">
+        <div class="step-title">🔒 Lock Escrow</div>
+        <div class="step-desc">Both parties deposit equal stakes into the Gavel smart contract on Somnia.</div>
+      </div>
+    </div>
+    <div class="step-row" data-reveal="3">
+      <div class="step-num">02</div>
+      <div class="step-content">
+        <div class="step-title">📎 Submit Evidence</div>
+        <div class="step-desc">Each party submits public evidence URLs — GitHub commits, invoices, screenshots.</div>
+      </div>
+    </div>
+    <div class="step-row" data-reveal="4">
+      <div class="step-num">03</div>
+      <div class="step-content">
+        <div class="step-title">🤖 Agents Deliberate</div>
+        <div class="step-desc">Somnia AI agents parse, validate, cross-check, and reason over all evidence autonomously.</div>
+      </div>
+    </div>
+    <div class="step-row" data-reveal="5">
+      <div class="step-num">04</div>
+      <div class="step-content">
+        <div class="step-title">⚖️ Verdict Enforced</div>
+        <div class="step-desc">Binding verdict triggers automatic fund release. Every step receipted on-chain.</div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ═══════════════ SLIDE 4 — SOMNIA INTEGRATION ═══════════════ -->
+<div class="slide" id="s4">
+  <div class="slide-accent-left"></div>
+  <div class="slide-topbar">
+    <div class="topbar-logo">
+      <svg class="logo-mini" viewBox="0 0 64 64" fill="none">
+        <rect width="64" height="64" rx="14" fill="#1A1814"/>
+        <path d="M23 15 15 23l20 20 8-8L23 15Zm-8 34 13-13 4 4-13 13H15v-4Zm26-31 5 5-8 8-5-5 8-8Z" fill="#FAF8F4"/>
+        <circle cx="49" cy="49" r="5" fill="#C84B2F"/>
+      </svg>
+      Gavel
+    </div>
+    <span class="topbar-label">Somnia Integration</span>
+  </div>
+
+  <div class="slide-content">
+    <div data-reveal="1">
+      <div class="section-eyebrow">Built natively on Somnia's Agentic L1</div>
+      <div class="slide-title">Live agents, verified on-chain.</div>
+    </div>
+
+    <div class="agents-grid">
+      <div class="agent-card" data-reveal="2">
+        <div class="agent-header" style="background:#EDE9FE;color:#7C3AED;">LLM Parse Website · Evidence Extraction</div>
+        <div class="agent-body">
+          <div class="agent-name">Parse Website Agent</div>
+          <div class="agent-id">ID: 12875401142070969085</div>
+          <div class="agent-desc">Fetches and parses plaintiff &amp; defendant evidence URLs, extracting factual claims, timestamps, and credibility scores on-chain.</div>
+        </div>
+      </div>
+      <div class="agent-card" data-reveal="3">
+        <div class="agent-header" style="background:#E0F2FE;color:#0EA5E9;">LLM Inference · Final Judgment</div>
+        <div class="agent-body">
+          <div class="agent-name">Inference Agent</div>
+          <div class="agent-id">ID: 12847293847561029384</div>
+          <div class="agent-desc">Generates structured verdict JSON containing winner, confidence score (0–100), and one-sentence reasoning based only on submitted evidence.</div>
+        </div>
+      </div>
+      <div class="agent-card" data-reveal="4">
+        <div class="agent-header" style="background:#FFF7ED;color:#F97316;">Platform Contract · Request Routing</div>
+        <div class="agent-body">
+          <div class="agent-name">SomniaAgents Contract</div>
+          <div class="agent-id">0x037Bb9C718F3f7fe5eCBDB0b600D607b52706776</div>
+          <div class="agent-desc">Routes agent requests and delivers validator callbacks back to the Gavel DisputeEscrow contract.</div>
+        </div>
+      </div>
+      <div class="agent-card" data-reveal="5">
+        <div class="agent-header" style="background:#D1FAE5;color:#059669;">Registry · Agent Metadata</div>
+        <div class="agent-body">
+          <div class="agent-name">AgentRegistry Contract</div>
+          <div class="agent-id">0x08D1Fc808f1983d2Ea7B63a28ECD4d8C885Cd02A</div>
+          <div class="agent-desc">Registry layer for Somnia agents, providing explorer metadata and agent discovery information.</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="contract-bar" data-reveal="6">
+      <span style="color:var(--muted);">Deployed:</span>
+      0xdc9A2ea119467AADcee21258A54138A8B138f6c5 · Shannon Testnet · Chain 50312
+    </div>
+  </div>
+</div>
+
+<!-- ═══════════════ SLIDE 5 — ARCHITECTURE ═══════════════ -->
+<div class="slide" id="s5">
+  <div class="slide-topbar" style="background:#201D18;border-bottom:1px solid rgba(255,255,255,0.06);">
+    <div class="topbar-logo">
+      <svg class="logo-mini" viewBox="0 0 64 64" fill="none">
+        <rect width="64" height="64" rx="14" fill="#1A1814"/>
+        <path d="M23 15 15 23l20 20 8-8L23 15Zm-8 34 13-13 4 4-13 13H15v-4Zm26-31 5 5-8 8-5-5 8-8Z" fill="#FAF8F4"/>
+        <circle cx="49" cy="49" r="5" fill="#C84B2F"/>
+      </svg>
+      Gavel
+    </div>
+    <span class="topbar-label">Architecture</span>
+  </div>
+
+  <div class="slide-content">
+    <div data-reveal="1">
+      <div class="section-eyebrow" style="color:var(--muted);">Full on-chain pipeline</div>
+      <div class="slide-title light">From wallet to verdict — fully autonomous.</div>
+    </div>
+
+    <div class="pipeline" data-reveal="2">
+      <div class="pipe-node" style="color:#0EA5E9;border-color:#0EA5E9;background:#0C3A52;">User<br/>Wallet</div>
+      <div class="pipe-arrow">→</div>
+      <div class="pipe-node" style="color:#22C55E;border-color:#22C55E;background:#0A2E19;">Gavel<br/>Dashboard</div>
+      <div class="pipe-arrow">→</div>
+      <div class="pipe-node" style="color:#7C3AED;border-color:#7C3AED;background:#2A1A4A;">DisputeEscrow<br/>.sol</div>
+      <div class="pipe-arrow">→</div>
+      <div class="pipe-node" style="color:#F97316;border-color:#F97316;background:#3D2010;">Somnia<br/>Agents</div>
+      <div class="pipe-arrow">→</div>
+      <div class="pipe-node" style="color:#4ADE80;border-color:#4ADE80;background:#0A2E19;">Verdict &amp;<br/>Payout</div>
+    </div>
+
+    <div class="arch-bottom">
+      <div>
+        <div class="arch-section-title" data-reveal="3">Agent pipeline stages</div>
+        <div class="stage-row" data-reveal="4">
+          <div class="stage-accent" style="background:#7C3AED;"></div>
+          <div class="stage-body">
+            <div class="stage-name">PlaintiffParse</div>
+            <div class="stage-agent">LLM Parse Website</div>
+          </div>
+          <div class="stage-cost">0.30 STT</div>
+        </div>
+        <div class="stage-row" data-reveal="5">
+          <div class="stage-accent" style="background:#7C3AED;"></div>
+          <div class="stage-body">
+            <div class="stage-name">DefendantParse</div>
+            <div class="stage-agent">LLM Parse Website</div>
+          </div>
+          <div class="stage-cost">0.30 STT</div>
+        </div>
+        <div class="stage-row" data-reveal="6">
+          <div class="stage-accent" style="background:#0EA5E9;"></div>
+          <div class="stage-body">
+            <div class="stage-name">Judge</div>
+            <div class="stage-agent">LLM Inference</div>
+          </div>
+          <div class="stage-cost">0.30 STT</div>
+        </div>
+      </div>
+      <div>
+        <div class="arch-section-title" data-reveal="3">Tech stack</div>
+        <div class="stack-item" data-reveal="4"><div class="stack-dot"></div> Solidity 0.8.24 · Hardhat</div>
+        <div class="stack-item" data-reveal="5"><div class="stack-dot"></div> React + Vite · RainbowKit</div>
+        <div class="stack-item" data-reveal="6"><div class="stack-dot"></div> Wagmi + Ethers v6</div>
+        <div class="stack-item" data-reveal="7"><div class="stack-dot"></div> Vercel deployment</div>
+      </div>
+    </div>
+
+    <div class="budget-bar-dark" data-reveal="8">
+      <span>●</span>
+      Total arbitration budget: 0.90 STT · Unused budget is fully refunded on-chain
+    </div>
+  </div>
+</div>
+
+<!-- ═══════════════ SLIDE 6 — AI JURY ═══════════════ -->
+<div class="slide" id="s6">
+  <div class="slide-accent-left"></div>
+  <div class="slide-topbar">
+    <div class="topbar-logo">
+      <svg class="logo-mini" viewBox="0 0 64 64" fill="none">
+        <rect width="64" height="64" rx="14" fill="#1A1814"/>
+        <path d="M23 15 15 23l20 20 8-8L23 15Zm-8 34 13-13 4 4-13 13H15v-4Zm26-31 5 5-8 8-5-5 8-8Z" fill="#FAF8F4"/>
+        <circle cx="49" cy="49" r="5" fill="#C84B2F"/>
+      </svg>
+      Gavel
+    </div>
+    <span class="topbar-label">The AI Jury</span>
+  </div>
+
+  <div class="slide-content">
+    <div data-reveal="1">
+      <div class="section-eyebrow">Four agents. One verdict.</div>
+      <div class="slide-title">The jury deliberates autonomously.</div>
+    </div>
+
+    <div class="jury-grid">
+      <div class="jury-card" data-reveal="2">
+        <div class="jury-top-bar" style="background:#7C3AED;"></div>
+        <div class="jury-body">
+          <div class="jury-badge" style="background:#EDE9FE;color:#7C3AED;border-color:#C4B5FD;">AGENT 01</div>
+          <div class="jury-name">🔍 Research Agent</div>
+          <div class="jury-desc">Fetches and parses all evidence URLs using Somnia's LLM Parse Website. Extracts factual claims, timestamps, and source credibility scores.</div>
+        </div>
+      </div>
+      <div class="jury-card" data-reveal="3">
+        <div class="jury-top-bar" style="background:#0EA5E9;"></div>
+        <div class="jury-body">
+          <div class="jury-badge" style="background:#E0F2FE;color:#0EA5E9;border-color:#7DD3FC;">AGENT 02</div>
+          <div class="jury-name">✅ Validator Agent</div>
+          <div class="jury-desc">Cross-checks extracted claims for consistency and source support. Flags unsupported, duplicated, contradictory, or ambiguous statements.</div>
+        </div>
+      </div>
+      <div class="jury-card" data-reveal="4">
+        <div class="jury-top-bar" style="background:#F97316;"></div>
+        <div class="jury-body">
+          <div class="jury-badge" style="background:#FFF7ED;color:#F97316;border-color:#FED7AA;">AGENT 03</div>
+          <div class="jury-name">⚠️ Skeptic Agent</div>
+          <div class="jury-desc">Stress-tests both sides of the dispute. Surfaces weaknesses, missing evidence, and risk notes without deciding the final outcome.</div>
+        </div>
+      </div>
+      <div class="jury-card" data-reveal="5">
+        <div class="jury-top-bar" style="background:#C84B2F;"></div>
+        <div class="jury-body">
+          <div class="jury-badge" style="background:#FFF3F0;color:#C84B2F;border-color:#E8C4BA;">AGENT 04</div>
+          <div class="jury-name">⚖️ Judge Agent</div>
+          <div class="jury-desc">Synthesizes all outputs into a final structured verdict: winner, confidence (0–100), and one-sentence reasoning. Determines fund release.</div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ═══════════════ SLIDE 7 — USE CASES ═══════════════ -->
+<div class="slide" id="s7">
+  <div class="slide-topbar" style="background:#201D18;border-bottom:1px solid rgba(255,255,255,0.06);">
+    <div class="topbar-logo">
+      <svg class="logo-mini" viewBox="0 0 64 64" fill="none">
+        <rect width="64" height="64" rx="14" fill="#1A1814"/>
+        <path d="M23 15 15 23l20 20 8-8L23 15Zm-8 34 13-13 4 4-13 13H15v-4Zm26-31 5 5-8 8-5-5 8-8Z" fill="#FAF8F4"/>
+        <circle cx="49" cy="49" r="5" fill="#C84B2F"/>
+      </svg>
+      Gavel
+    </div>
+    <span class="topbar-label">Use Cases</span>
+  </div>
+
+  <div class="slide-content">
+    <div data-reveal="1">
+      <div class="section-eyebrow" style="color:var(--muted);">Built for the trustless economy</div>
+      <div class="slide-title light">Anywhere value changes hands.</div>
+    </div>
+
+    <div class="usecases-grid">
+      <div class="uc-card" data-reveal="2">
+        <div class="uc-icon">💼</div>
+        <div class="uc-title">Freelance work</div>
+        <div class="uc-tag">→ Most common use case</div>
+        <div class="uc-desc">Lock payment in escrow; agents verify deliverables against the brief automatically.</div>
+      </div>
+      <div class="uc-card" data-reveal="3">
+        <div class="uc-icon">🛒</div>
+        <div class="uc-title">P2P marketplace</div>
+        <div class="uc-tag">→ Zero platform liability</div>
+        <div class="uc-desc">Goods, NFTs, digital assets — buyer and seller both protected autonomously.</div>
+      </div>
+      <div class="uc-card" data-reveal="4">
+        <div class="uc-icon">🏛</div>
+        <div class="uc-title">DAO grants &amp; bounties</div>
+        <div class="uc-tag">→ Trustless governance</div>
+        <div class="uc-desc">Release grant funds only when deliverables are verified on-chain by agents.</div>
+      </div>
+      <div class="uc-card" data-reveal="5">
+        <div class="uc-icon">📋</div>
+        <div class="uc-title">B2B milestones</div>
+        <div class="uc-tag">→ No escrow agent needed</div>
+        <div class="uc-desc">Enterprise contracts with automated, milestone-based payment verification.</div>
+      </div>
+      <div class="uc-card" data-reveal="6">
+        <div class="uc-icon">🎯</div>
+        <div class="uc-title">Prediction markets</div>
+        <div class="uc-tag">→ Fully autonomous resolution</div>
+        <div class="uc-desc">Agents parse official public sources to determine market outcomes reliably.</div>
+      </div>
+      <div class="uc-card" data-reveal="7">
+        <div class="uc-icon">🔐</div>
+        <div class="uc-title">Insurance claims</div>
+        <div class="uc-tag">→ Instant autonomous payout</div>
+        <div class="uc-desc">Parametric insurance triggered by real-world events verified on-chain.</div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ═══════════════ SLIDE 8 — DEMO & LINKS ═══════════════ -->
+<div class="slide" id="s8">
+  <div class="slide-accent-left"></div>
+  <div class="slide-topbar">
+    <div class="topbar-logo">
+      <svg class="logo-mini" viewBox="0 0 64 64" fill="none">
+        <rect width="64" height="64" rx="14" fill="#1A1814"/>
+        <path d="M23 15 15 23l20 20 8-8L23 15Zm-8 34 13-13 4 4-13 13H15v-4Zm26-31 5 5-8 8-5-5 8-8Z" fill="#FAF8F4"/>
+        <circle cx="49" cy="49" r="5" fill="#C84B2F"/>
+      </svg>
+      Gavel
+    </div>
+    <span class="topbar-label">Demo &amp; Links</span>
+  </div>
+
+  <div class="slide-content">
+    <div data-reveal="1">
+      <div class="section-eyebrow">Try it live on Somnia Testnet</div>
+      <div class="slide-title">From wallet to verdict in minutes.</div>
+    </div>
+
+    <div class="demo-layout">
+      <div>
+        <div class="demo-section-title" data-reveal="2">Demo flow</div>
+        <div class="demo-step" data-reveal="2">
+          <div class="demo-num">1</div>
+          <div class="demo-text">Connect wallet on the landing page</div>
+        </div>
+        <div class="demo-step" data-reveal="3">
+          <div class="demo-num">2</div>
+          <div class="demo-text">Switch to Somnia testnet (Chain ID 50312)</div>
+        </div>
+        <div class="demo-step" data-reveal="4">
+          <div class="demo-num">3</div>
+          <div class="demo-text">Create a dispute and lock escrow</div>
+        </div>
+        <div class="demo-step" data-reveal="5">
+          <div class="demo-num">4</div>
+          <div class="demo-text">Submit evidence URLs for both parties</div>
+        </div>
+        <div class="demo-step" data-reveal="6">
+          <div class="demo-num">5</div>
+          <div class="demo-text">Request arbitration with min 0.90 STT budget</div>
+        </div>
+        <div class="demo-step" data-reveal="7">
+          <div class="demo-num">6</div>
+          <div class="demo-text">Watch live hearing &amp; open the Somnia receipt</div>
+        </div>
+      </div>
+
+      <div>
+        <div class="demo-section-title" data-reveal="2">Links</div>
+        <a class="link-card" href="https://gavel-nine.vercel.app" target="_blank" data-reveal="2">
+          <div class="link-label" style="color:var(--accent);">🌐 Live App</div>
+          <div class="link-val">gavel-nine.vercel.app</div>
+        </a>
+        <a class="link-card" href="https://github.com/NikhilRaikwar/Gavel" target="_blank" data-reveal="3">
+          <div class="link-label" style="color:#7C3AED;">⬡ GitHub</div>
+          <div class="link-val">github.com/NikhilRaikwar/Gavel</div>
+        </a>
+        <a class="link-card" href="https://shannon-explorer.somnia.network/address/0xdc9A2ea119467AADcee21258A54138A8B138f6c5" target="_blank" data-reveal="4">
+          <div class="link-label" style="color:#0EA5E9;">📋 Contract</div>
+          <div class="link-val">0xdc9A2ea119467AADcee21…8f6c5</div>
+        </a>
+        <a class="link-card" href="https://agents.testnet.somnia.network/agent/12875401142070969085" target="_blank" data-reveal="5">
+          <div class="link-label" style="color:var(--green);">🤖 Somnia Agents</div>
+          <div class="link-val">agents.testnet.somnia.network</div>
+        </a>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ═══════════════ SLIDE 9 — CLOSING ═══════════════ -->
+<div class="slide" id="s9">
+  <div class="s1-accent-bar"></div>
+
+  <div class="s9-logo" data-reveal="1">
+    <svg viewBox="0 0 64 64" fill="none" xmlns="http://www.w3.org/2000/svg" style="width:70px;height:70px;">
+      <path d="M23 15 15 23l20 20 8-8L23 15Zm-8 34 13-13 4 4-13 13H15v-4Zm26-31 5 5-8 8-5-5 8-8Z" fill="#FAF8F4"/>
+      <circle cx="49" cy="49" r="5" fill="#C84B2F"/>
+    </svg>
+  </div>
+
+  <div class="s9-title" data-reveal="2">Gavel</div>
+  <div class="s9-sub" data-reveal="3">The Onchain AI Court on Somnia</div>
+
+  <div class="s9-links" data-reveal="4">
+    <a class="s9-link primary" href="https://gavel-nine.vercel.app" target="_blank">
+      🌐 Live Demo
+    </a>
+    <a class="s9-link secondary" href="https://github.com/NikhilRaikwar/Gavel" target="_blank">
+      ⬡ GitHub
+    </a>
+    <a class="s9-link secondary" href="https://shannon-explorer.somnia.network/address/0xdc9A2ea119467AADcee21258A54138A8B138f6c5" target="_blank">
+      📋 Contract
+    </a>
+  </div>
+
+  <div class="s9-credit" data-reveal="5">Built by Nikhil Raikwar · Somnia Agentathon 2026</div>
+</div>
+
+<!-- ═══════════════ NAVIGATION ═══════════════ -->
+<div id="nav">
+  <button class="prev-btn" onclick="navigate(-1)">←</button>
+  <div class="dot-nav" id="dots"></div>
+  <span id="slide-counter">1 / 9</span>
+  <button class="next-btn" onclick="navigate(1)">→</button>
+  <button id="fullscreen-btn" onclick="toggleFullscreen()" title="Fullscreen">⛶</button>
+</div>
+
+<script>
+  const TOTAL = 9;
+  let current = 0;
+  let transitioning = false;
+
+  const slides = Array.from(document.querySelectorAll('.slide'));
+  const dotsContainer = document.getElementById('dots');
+  const counter = document.getElementById('slide-counter');
+  const progress = document.getElementById('progress');
+
+  // Build dots
+  for (let i = 0; i < TOTAL; i++) {
+    const d = document.createElement('div');
+    d.className = 'dot' + (i === 0 ? ' active' : '');
+    d.onclick = () => goTo(i);
+    dotsContainer.appendChild(d);
+  }
+
+  function updateUI() {
+    const dots = dotsContainer.querySelectorAll('.dot');
+    dots.forEach((d, i) => d.classList.toggle('active', i === current));
+    counter.textContent = `${current + 1} / ${TOTAL}`;
+    progress.style.width = `${((current + 1) / TOTAL) * 100}%`;
+  }
+
+  function goTo(idx) {
+    if (transitioning || idx === current) return;
+    transitioning = true;
+
+    const prev = slides[current];
+    const next = slides[idx];
+
+    prev.classList.add('leaving');
+    prev.addEventListener('animationend', () => {
+      prev.classList.remove('active', 'leaving');
+      transitioning = false;
+    }, { once: true });
+
+    next.classList.add('active', 'entering');
+    next.addEventListener('animationend', () => {
+      next.classList.remove('entering');
+    }, { once: true });
+
+    current = idx;
+    updateUI();
+  }
+
+  function navigate(dir) {
+    const next = (current + dir + TOTAL) % TOTAL;
+    goTo(next);
+  }
+
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'ArrowRight' || e.key === 'ArrowDown' || e.key === ' ') navigate(1);
+    if (e.key === 'ArrowLeft' || e.key === 'ArrowUp') navigate(-1);
+  });
+
+  // Touch / swipe
+  let touchX = 0;
+  document.addEventListener('touchstart', (e) => { touchX = e.touches[0].clientX; });
+  document.addEventListener('touchend', (e) => {
+    const dx = e.changedTouches[0].clientX - touchX;
+    if (Math.abs(dx) > 50) navigate(dx < 0 ? 1 : -1);
+  });
+
+  function toggleFullscreen() {
+    if (!document.fullscreenElement) document.documentElement.requestFullscreen();
+    else document.exitFullscreen();
+  }
+
+  updateUI();
+</script>
+</body>
+</html>
