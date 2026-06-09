@@ -10,6 +10,7 @@ async function main() {
 
   await hre.run("verify:verify", {
     address,
+    contract: "contracts/DisputeEscrowV2.sol:DisputeEscrowV2",
     constructorArguments: [platform, parseAgentId, judgeAgentId]
   });
 }

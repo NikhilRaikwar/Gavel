@@ -50,6 +50,19 @@ interface IAgentRequester {
     ) external payable returns (uint256 requestId);
 
     function getRequestDeposit() external view returns (uint256);
+
+    function createAdvancedRequest(
+        uint256 agentId,
+        address callbackAddress,
+        bytes4 callbackSelector,
+        bytes calldata payload,
+        uint256 subcommitteeSize,
+        uint256 threshold,
+        ConsensusType consensusType,
+        uint256 timeout
+    ) external payable returns (uint256 requestId);
+
+    function getAdvancedRequestDeposit(uint256 subcommitteeSize) external view returns (uint256);
 }
 
 interface IAgentRequesterHandler {

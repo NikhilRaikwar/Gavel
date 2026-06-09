@@ -9,6 +9,7 @@
     "contracts:test": "cross-env APPDATA=.hardhat-home LOCALAPPDATA=.hardhat-home hardhat test",
     "deploy:somnia": "cross-env APPDATA=.hardhat-home LOCALAPPDATA=.hardhat-home hardhat run scripts/deploy.js --network somniaTestnet",
     "verify:somnia": "cross-env APPDATA=.hardhat-home LOCALAPPDATA=.hardhat-home hardhat run scripts/verify.js --network somniaTestnet",
+    "proof:somnia": "cross-env APPDATA=.hardhat-home LOCALAPPDATA=.hardhat-home hardhat run scripts/live-proof-v2.js --network somniaTestnet",
     "frontend:dev": "vite --host 0.0.0.0",
     "frontend:build": "vite build",
     "frontend:preview": "vite preview --host 0.0.0.0",

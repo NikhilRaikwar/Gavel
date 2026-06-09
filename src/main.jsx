@@ -12,9 +12,10 @@ import "./styles.css";
 import { Analytics } from "@vercel/analytics/react";
 
 const SOMNIA_CHAIN_ID = 50312;
-const SOMNIA_RPC_URL = "https://dream-rpc.somnia.network";
+const SOMNIA_RPC_URL = import.meta.env.VITE_SOMNIA_RPC_URL || "https://api.infra.testnet.somnia.network";
 const RECEIPTS_URL = "https://receipts.testnet.agents.somnia.host";
-const CONTRACT_ADDRESS = import.meta.env.VITE_DISPUTE_ESCROW_ADDRESS || "";
+const SOMNIA_AGENTS_ADDRESS = import.meta.env.VITE_SOMNIA_AGENTS_ADDRESS || "0x037Bb9C718F3f7fe5eCBDB0b600D607b52706776";
+const CONTRACT_ADDRESS = import.meta.env.VITE_DISPUTE_ESCROW_ADDRESS || "0xEd614e7A3A80fd26426c6780cC15cf9a4F003f21";
 const SITE_URL = import.meta.env.VITE_SITE_URL || "https://gavel.example.com";
 const SUPPORTED_PAGES = new Set(["overview", "cases", "create", "evidence", "arbitration", "verdict", "receipt"]);
 
@@ -90,11 +91,10 @@ function disputeStateLabel(state) {
     "Evidence pending",
     "Evidence ready",
     "Arbitrating",
-    "Appeal window",
+    "Agent failed",
     "Resolved",
-    "Escalated to DAO",
     "Expired",
-    "Agent failed"
+    "Recovered"
   ][Number(state)] || "Unknown";
 }
 
@@ -122,7 +122,7 @@ function isPartyInDispute(dispute, wallet) {
   return dispute.plaintiff?.toLowerCase?.() === target || dispute.defendant?.toLowerCase?.() === target;
 }
 
-function normalizeDispute(dispute, id, wallet) {
+function normalizeDispute(dispute, id, wallet, requestIds = []) {
   if (!dispute) return null;
   const lowerWallet = wallet?.toLowerCase?.() || "";
   const role =
@@ -132,8 +132,8 @@ function normalizeDispute(dispute, id, wallet) {
         ? "Defendant"
         : "Observer";
 
-  const rawRequestId = dispute.latestRequestId?.toString?.() || "";
-  const latestRequestId = rawRequestId === "0" ? "" : rawRequestId;
+  const normalizedRequestIds = Array.from(requestIds || []).map((value) => value?.toString?.() || "").filter((value) => value && value !== "0");
+  const latestRequestId = normalizedRequestIds.at(-1) || "";
   const winner = dispute.winner && dispute.winner !== ethers.ZeroAddress ? dispute.winner : "";
 
   return {
@@ -143,9 +143,10 @@ function normalizeDispute(dispute, id, wallet) {
     defendant: dispute.defendant,
     plaintiffDeposit: dispute.plaintiffDeposit?.toString?.() || "0",
     defendantDeposit: dispute.defendantDeposit?.toString?.() || "0",
-    heldAmount: dispute.heldAmount?.toString?.() || "0",
+    arbitrationFunder: dispute.arbitrationFunder || "",
+    heldAmount: "0",
     agentBudget: dispute.agentBudget?.toString?.() || "0",
-    appealDeadline: dispute.appealDeadline?.toString?.() || "0",
+    failedAt: dispute.failedAt?.toString?.() || "0",
     createdAt: dispute.createdAt?.toString?.() || "0",
     state: dispute.state,
     stateLabel: disputeStateLabel(dispute.state),
@@ -155,9 +156,14 @@ function normalizeDispute(dispute, id, wallet) {
     defendantEvidenceUrl: dispute.defendantEvidenceUrl || "",
     plaintiffSummary: dispute.plaintiffSummary || "",
     defendantSummary: dispute.defendantSummary || "",
-    verdictJson: dispute.verdictJson || "",
+    validationSummary: dispute.validationSummary || "",
+    skepticSummary: dispute.skepticSummary || "",
+    verdictJson: dispute.verdictReasoning ? `GAVEL_V1|${winner ? (winner.toLowerCase() === dispute.plaintiff?.toLowerCase?.() ? "plaintiff" : "defendant") : "split"}|${Number(dispute.confidence || 0)}|${dispute.verdictReasoning}` : "",
     verdictReasoning: dispute.verdictReasoning || "",
     latestRequestId,
+    requestIds: normalizedRequestIds,
+    currentStage: Number(dispute.currentStage || 0),
+    failedStage: Number(dispute.failedStage || 0),
     role
   };
 }
@@ -165,12 +171,12 @@ function normalizeDispute(dispute, id, wallet) {
 function caseActionForDispute(dispute) {
   if (!dispute) return { label: "View case", page: "overview" };
   if (dispute.latestRequestId) {
-    if (Number(dispute.state) >= 5) return { label: "View receipt", page: "receipt" };
-    if (Number(dispute.state) === 4) return { label: "View verdict", page: "verdict" };
+    if (Number(dispute.state) === 5) return { label: "View receipt", page: "receipt" };
+    if (Number(dispute.state) === 4) return { label: "Recover case", page: "evidence" };
     if (Number(dispute.state) === 3) return { label: "Open hearing", page: "arbitration" };
     return { label: "View verdict", page: "verdict" };
   }
-  if (Number(dispute.state) <= 1) return { label: "Add evidence", page: "evidence" };
+  if (Number(dispute.state) <= 2) return { label: "Add evidence", page: "evidence" };
   return { label: "Continue case", page: "evidence" };
 }
 
@@ -370,7 +376,7 @@ function App() {
         ]
       }));
     };
-    const onStep = (id, stage, step, data) => {
+    const onStep = (id, requestId, stage, data) => {
       const key = id.toString();
       setCaseEvents((current) => ({
         ...current,
@@ -378,7 +384,7 @@ function App() {
           ...(current[key] || []),
           {
             agent: stageName(Number(stage)).toUpperCase(),
-            step,
+            step: `${stageName(Number(stage))} completed (request #${requestId.toString()})`,
             data,
             time: new Date().toLocaleTimeString(),
             status: "done"
@@ -410,11 +416,11 @@ function App() {
     };
 
     readContract.on("AgentRequestCreated", onRequest);
-    readContract.on("AgentStep", onStep);
+    readContract.on("AgentStepCompleted", onStep);
     readContract.on("VerdictDelivered", onVerdict);
     return () => {
       readContract.off("AgentRequestCreated", onRequest);
-      readContract.off("AgentStep", onStep);
+      readContract.off("AgentStepCompleted", onStep);
       readContract.off("VerdictDelivered", onVerdict);
     };
   }, [readContract]);
@@ -447,11 +453,11 @@ function App() {
     if (!readContract || !address) return [];
     setLoadingCases(true);
     try {
-      const total = Number(await readContract.disputeCount());
+      const ids = await readContract.getPartyCaseIds(address);
       const disputes = await Promise.all(
-        Array.from({ length: total }, async (_, index) => {
-          const dispute = await readContract.getDispute(index);
-          return isPartyInDispute(dispute, address) ? normalizeDispute(dispute, index, address) : null;
+        ids.map(async (id) => {
+          const [dispute, requestIds] = await Promise.all([readContract.getDispute(id), readContract.getStageRequestIds(id)]);
+          return isPartyInDispute(dispute, address) ? normalizeDispute(dispute, id, address, requestIds) : null;
         })
       );
       const owned = disputes.filter(Boolean).sort((a, b) => Number(b.id) - Number(a.id));
@@ -604,11 +610,17 @@ function App() {
       setNotice("Load or create a dispute first.");
       return;
     }
-    const budget = document.querySelector("[data-agent-budget]")?.value || "0.90";
+    const minimum = await readContract.minimumAgentBudget();
+    const budgetInput = document.querySelector("[data-agent-budget]")?.value;
+    const budget = budgetInput ? ethers.parseEther(budgetInput) : minimum;
+    if (budget < minimum) {
+      setNotice(`Agent budget must be at least ${formatStt(minimum)} STT.`);
+      return;
+    }
     setBusy(true);
     try {
       const contract = await contractPromise;
-      const tx = await contract.requestArbitration(disputeId, { value: ethers.parseEther(budget) });
+      const tx = await contract.requestArbitration(disputeId, { value: budget });
       await tx.wait();
       if (tx.hash) {
         localStorage.setItem(`gavel_arbitration_tx_${disputeId}`, tx.hash);
@@ -623,22 +635,77 @@ function App() {
     }
   }
 
+  async function retryFailedStage() {
+    const contractPromise = await getWriteContract();
+    if (!contractPromise || !activeDispute || Number(activeDispute.state) !== 4) return;
+    setBusy(true);
+    try {
+      const required = await readContract.requiredBudget(activeDispute.failedStage);
+      const contract = await contractPromise;
+      const tx = await contract.retryFailedStage(disputeId, { value: required });
+      await tx.wait();
+      setNotice(`Failed stage retried with ${formatStt(required)} STT.`);
+      await loadMyCases(disputeId);
+      setPage("arbitration");
+    } catch (error) {
+      setNotice(errorMessage(error));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function recoverFailedDispute() {
+    const contractPromise = await getWriteContract();
+    if (!contractPromise || !activeDispute || Number(activeDispute.state) !== 4) return;
+    setBusy(true);
+    try {
+      const contract = await contractPromise;
+      const tx = await contract.recoverFailedDispute(disputeId);
+      await tx.wait();
+      setNotice("Escrow and remaining agent budget credited for withdrawal.");
+      await loadMyCases(disputeId);
+    } catch (error) {
+      setNotice(errorMessage(error));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function withdrawFunds() {
+    const contractPromise = await getWriteContract();
+    if (!contractPromise) return;
+    setBusy(true);
+    try {
+      const amount = await readContract.withdrawable(address);
+      if (amount === 0n) throw new Error("No credited funds are available.");
+      const contract = await contractPromise;
+      const tx = await contract.withdraw();
+      await tx.wait();
+      setNotice(`${formatStt(amount)} STT withdrawn.`);
+      await loadMyCases(disputeId);
+    } catch (error) {
+      setNotice(errorMessage(error));
+    } finally {
+      setBusy(false);
+    }
+  }
+
   async function fetchPastEvents(id, normalized) {
     if (!readContract) return;
     const target = normalized || activeDispute;
     if (!target) return;
 
     const reconstructed = [];
-    if (target.latestRequestId) {
+    (target.requestIds || []).forEach((requestId, index) => {
       reconstructed.push({
-        agent: "RESEARCH",
-        step: `Somnia request #${target.latestRequestId} created`,
+        agent: stageName(index + 1).toUpperCase(),
+        step: `Somnia request #${requestId} created`,
         data: "Waiting for validator consensus and callback.",
         time: "On-chain",
-        requestId: target.latestRequestId,
+        requestId,
         status: "active"
       });
-    }
+    });
     if (target.plaintiffSummary) {
       reconstructed.push({
         agent: "RESEARCH",
@@ -656,6 +723,12 @@ function App() {
         time: "On-chain",
         status: "done"
       });
+    }
+    if (target.validationSummary) {
+      reconstructed.push({ agent: "VALIDATOR", step: "Evidence validation complete", data: target.validationSummary, time: "On-chain", status: "done" });
+    }
+    if (target.skepticSummary) {
+      reconstructed.push({ agent: "SKEPTIC", step: "Cross-examination complete", data: target.skepticSummary, time: "On-chain", status: "done" });
     }
     if (target.verdictJson) {
       reconstructed.push({
@@ -676,22 +749,6 @@ function App() {
     let cachedCreate = localStorage.getItem(`gavel_create_tx_${id}`);
     let cachedArb = localStorage.getItem(`gavel_arbitration_tx_${id}`);
     let cachedVerdict = localStorage.getItem(`gavel_verdict_tx_${id}`);
-
-    // Seed fallback for Case #0
-    if (id.toString() === "0") {
-      if (!cachedCreate) {
-        cachedCreate = "0xd914d3a82f5086749a15a488b187c8e84aa5886817c36b8e96a2909042d380c9";
-        localStorage.setItem(`gavel_create_tx_${id}`, cachedCreate);
-      }
-      if (!cachedArb) {
-        cachedArb = "0x2cbb16d71eec1760ab678984d25c9820f51f0d90a8145919873db58299f71855";
-        localStorage.setItem(`gavel_arbitration_tx_${id}`, cachedArb);
-      }
-      if (!cachedVerdict) {
-        cachedVerdict = "0x4d3f15feb497d3fb8273e234064aa2e3a86e147c648adeec0a2e59fb5959d92e";
-        localStorage.setItem(`gavel_verdict_tx_${id}`, cachedVerdict);
-      }
-    }
 
     if (cachedCreate) setCreateTxHash(cachedCreate);
     if (cachedArb) setArbitrationTxHash(cachedArb);
@@ -768,34 +825,14 @@ function App() {
     }
   }
 
-  async function finalizeAppealDispute() {
-    const contractPromise = await getWriteContract();
-    if (!contractPromise || !disputeId) {
-      setNotice("Load or create a dispute first.");
-      return;
-    }
-    setBusy(true);
-    try {
-      const contract = await contractPromise;
-      const tx = await contract.finalizeAppeal(disputeId);
-      await tx.wait();
-      setNotice("Appeal finalized. Remaining escrow released.");
-      await loadMyCases(disputeId);
-    } catch (error) {
-      setNotice(errorMessage(error));
-    } finally {
-      setBusy(false);
-    }
-  }
-
   async function loadDispute(id = disputeId, ownedCases = caseList) {
     if (!readContract || id === "") {
       setNotice("Set a deployed contract address and dispute ID first.");
       return;
     }
     try {
-      const dispute = await readContract.getDispute(id);
-      const normalized = normalizeDispute(dispute, id, address);
+      const [dispute, requestIds] = await Promise.all([readContract.getDispute(id), readContract.getStageRequestIds(id)]);
+      const normalized = normalizeDispute(dispute, id, address, requestIds);
       if (address && !isPartyInDispute(dispute, address)) {
         setActiveDispute(null);
         setReceipt(null);
@@ -818,22 +855,20 @@ function App() {
   }
 
   async function loadReceipt(requestId) {
-    const target = requestId || activeDispute?.latestRequestId?.toString?.();
-    if (!target) {
+    const targets = requestId ? [requestId.toString()] : activeDispute?.requestIds || [];
+    if (targets.length === 0) {
       setReceiptError("This case has not started arbitration yet, so no Somnia request ID exists.");
       return;
     }
     setReceiptLoading(true);
     setReceiptError("");
     try {
-      const response = await fetch(`${RECEIPTS_URL}?requestId=${target}`);
-      if (!response.ok) {
-        if (response.status === 404) {
-          throw new Error("Receipt is still indexing on Somnia Testnet (404).");
-        }
-        throw new Error(`Receipt service returned ${response.status}`);
-      }
-      setReceipt(await response.json());
+      const manifests = await Promise.all(targets.map(async (target) => {
+        const response = await fetch(`${RECEIPTS_URL}/agent-receipts?contractAddress=${SOMNIA_AGENTS_ADDRESS}&requestId=${target}&type=minimal`);
+        if (!response.ok) throw new Error(`Receipt ${target} returned ${response.status}`);
+        return response.json();
+      }));
+      setReceipt({ manifests });
     } catch (error) {
       setReceipt(null);
       setReceiptError(error.message);
@@ -883,6 +918,7 @@ function App() {
       page={page}
       setPage={setPage}
       notice={notice}
+      setNotice={setNotice}
       busy={busy}
       loadingCases={loadingCases}
       address={address}
@@ -900,9 +936,11 @@ function App() {
       loadSelectedCase={loadSelectedCase}
       submitEvidence={submitEvidence}
       requestArbitration={requestArbitration}
+      retryFailedStage={retryFailedStage}
+      recoverFailedDispute={recoverFailedDispute}
+      withdrawFunds={withdrawFunds}
       loadReceipt={loadReceipt}
       shareVerdict={shareVerdict}
-      finalizeAppealDispute={finalizeAppealDispute}
       verdictTxHash={verdictTxHash}
       createTxHash={createTxHash}
       arbitrationTxHash={arbitrationTxHash}
@@ -955,29 +993,35 @@ function Landing({ onOpenApp }) {
             </ConnectButton.Custom>
             <a href="#how" className="btn-secondary">See how it works <span>⌄</span></a>
           </div>
-          <div className="hero-stats">
-            <div className="stat-item"><span className="stat-num">1</span><span className="stat-label">Escrow contract</span></div>
-            <div className="stat-item"><span className="stat-num">3</span><span className="stat-label">Live Somnia agents</span></div>
-            <div className="stat-item"><span className="stat-num">100%</span><span className="stat-label">On-chain receipts</span></div>
-          </div>
           <div className="hero-visual">
-            <div className="verdict-card">
-              <div className="vc-header">
-                <div className="vc-gavel">⚖</div>
-                <div><div className="vc-title">Live dispute pipeline</div><div className="vc-id">Connect your wallet to load your cases</div></div>
+            <div className="jury-console">
+              <div className="jury-console-head">
+                <div>
+                  <div className="jury-kicker">After arbitration starts</div>
+                  <div className="jury-case">Gavel handles the entire case</div>
+                </div>
+                <div className="jury-network"><span /> Running live</div>
               </div>
-              <div className="vc-steps">
-                <VerdictStep name="Research Agent" sub="Extracts factual claims from public evidence" done />
-                <VerdictStep name="Validator Agent" sub="Checks claims for consistency" done />
-                <VerdictStep name="Judge Agent" sub="Returns the final verdict JSON" active />
+              <div className="jury-flow">
+                <JuryStage number="01" name="Reads plaintiff evidence" detail="Finds the facts supporting the claim" tone="research" />
+                <JuryStage number="02" name="Reads defendant evidence" detail="Finds the facts supporting the response" tone="research" />
+                <JuryStage number="03" name="Verifies both sides" detail="Checks links, claims, and contradictions" tone="validate" />
+                <JuryStage number="04" name="Challenges weak claims" detail="Tests whether either argument is unsupported" tone="challenge" />
+                <JuryStage number="05" name="Decides the case and unlocks funds" detail="Records the verdict and makes the payout withdrawable" tone="judge" wide />
               </div>
-              <div className="vc-verdict">
-                <div className="vc-verdict-label">Verdict</div>
-                <div className="vc-verdict-winner">No case selected</div>
-                <div className="vc-verdict-reason">Connect a wallet, open one of your disputes, and the live verdict and receipt panels will populate from Somnia.</div>
-                <div className="vc-verdict-conf"><div className="conf-bar"><div className="conf-fill" /></div><span className="conf-label">Awaiting request</span></div>
+              <div className="jury-proof">
+                <div>
+                  <span className="jury-proof-label">Proven live on Somnia</span>
+                  <strong>Case #0 completed from evidence to verdict</strong>
+                </div>
+                <div className="jury-proof-state"><span /> Verdict enforced</div>
               </div>
             </div>
+          </div>
+          <div className="hero-stats">
+            <div className="stat-item"><span className="stat-num">Live</span><span className="stat-label">Working Somnia testnet MVP</span></div>
+            <div className="stat-item"><span className="stat-num">1 click</span><span className="stat-label">Starts the complete AI jury</span></div>
+            <div className="stat-item"><span className="stat-num">Automatic</span><span className="stat-label">Verdict recorded and funds released</span></div>
           </div>
         </div>
       </section>
@@ -991,7 +1035,7 @@ function Landing({ onOpenApp }) {
       <section id="how" className="section">
         <div className="section-label">How it works</div>
         <h2 className="section-title">From dispute to<br />verdict in four steps</h2>
-        <p className="section-sub">No lawyers. No oracles. No off-chain servers. Just smart contracts and AI agents.</p>
+        <p className="section-sub">No human arbiter and no trusted oracle. Somnia validators execute the agent jury and return consensus results to the escrow contract.</p>
         <div className="steps-grid">
           <StepCard num="01" icon="🔒" title="Lock escrow" text="Both parties deposit equal stakes into the Gavel smart contract. Funds are locked until verdict." />
           <StepCard num="02" icon="📎" title="Submit evidence" text="Each party submits URLs or JSON as evidence - GitHub commits, invoices, screenshots, any public link." />
@@ -1003,10 +1047,10 @@ function Landing({ onOpenApp }) {
       <section id="agents" className="agents-section">
         <div className="agents-inner">
           <div className="section-label">The AI jury</div>
-          <h2 className="section-title">Four agents.<br />One verdict.</h2>
+          <h2 className="section-title">Five stages.<br />One verdict.</h2>
           <p className="section-sub">Gavel chains Somnia AI agents that debate, cross-check, and reach consensus - just like a real jury.</p>
           <div className="agents-grid">
-            {["Research Agent", "Validator Agent", "Skeptic Agent", "Judge Agent"].map((name, index) => (
+            {["Plaintiff Research", "Defendant Research", "Evidence Validator", "Skeptic", "Final Judge"].map((name, index) => (
               <div className="agent-card" key={name}>
                 <div className="agent-badge">AGENT 0{index + 1}</div>
                 <h3>{name}</h3>
@@ -1204,8 +1248,8 @@ function DashboardShell(props) {
 
 function Overview({ setPage, caseList, loadingCases, loadSelectedCase, loadReceipt }) {
   const totalCases = caseList.length;
-  const activeCases = caseList.filter((entry) => Number(entry.state) >= 0 && Number(entry.state) <= 3).length;
-  const resolvedCases = caseList.filter((entry) => Number(entry.state) >= 5).length;
+  const activeCases = caseList.filter((entry) => Number(entry.state) >= 0 && Number(entry.state) <= 4).length;
+  const resolvedCases = caseList.filter((entry) => Number(entry.state) === 5).length;
   const lockedStake = caseList.reduce(
     (sum, entry) => sum + BigInt(entry.plaintiffDeposit || "0") + BigInt(entry.defendantDeposit || "0"),
     0n
@@ -1293,7 +1337,7 @@ function Create({ createDispute, busy }) {
   );
 }
 
-function Evidence({ disputeId, activeDispute, caseList, loadSelectedCase, submitEvidence, requestArbitration, joinDispute, busy, loadingCases, address }) {
+function Evidence({ disputeId, activeDispute, caseList, loadSelectedCase, submitEvidence, requestArbitration, retryFailedStage, recoverFailedDispute, withdrawFunds, joinDispute, busy, loadingCases, address }) {
   const currentCase = activeDispute || caseList.find((entry) => entry.id === disputeId) || null;
   const canArbitrate = currentCase && currentCase.plaintiffEvidenceUrl && currentCase.defendantEvidenceUrl;
   const state = Number(currentCase?.state ?? -1);
@@ -1364,7 +1408,7 @@ function Evidence({ disputeId, activeDispute, caseList, loadSelectedCase, submit
                 </div>
                 <div className="arbitration-budget-inputs">
                   <span>Agent Budget:</span>
-                  <input data-agent-budget type="number" min="0.90" step="0.01" defaultValue="0.90" className="stake-input" />
+                  <input data-agent-budget type="number" min="1.28" step="0.01" defaultValue="1.28" className="stake-input" />
                   <span className="mono">STT</span>
                   <button className="btn btn-dark" onClick={requestArbitration} disabled={busy || !canArbitrate}>
                     {busy ? "Starting..." : "Request arbitration →"}
@@ -1374,13 +1418,25 @@ function Evidence({ disputeId, activeDispute, caseList, loadSelectedCase, submit
               <div className="budget-help-card">
                 <div className="budget-help-title">💡 About Somnia Agent Validation & Budgets</div>
                 <div className="budget-help-text">
-                  The Gavel contract locks the specified Agent Budget (default: 0.90 STT) to compensate the Shannon Testnet validators executing the multi-agent consensus pipeline:
+                  The Gavel contract funds five autonomous Somnia requests: two evidence researchers, a validator, a skeptic, and a final judge.
                   <ul style={{ marginLeft: "1.25rem", marginTop: "4px" }}>
-                    <li><strong>LLM Parse (0.30 STT):</strong> Research agent fetches and extracts evidence claims using Somnia's Agent Service.</li>
-                    <li><strong>Validator Agent (0.30 STT):</strong> Compares claims for consistency.</li>
-                    <li><strong>LLM Inference & Judge (0.30 STT):</strong> Executes reasoning to deliver the final verdict on-chain.</li>
+                    <li><strong>Research:</strong> Both evidence URLs are independently parsed by validator-executed agents.</li>
+                    <li><strong>Deliberation:</strong> Validator and skeptic agents challenge the evidence record.</li>
+                    <li><strong>Judge:</strong> A strict-format consensus verdict controls escrow credits.</li>
                   </ul>
-                  Any unused budget is fully refunded to you on-chain after consensus is reached.
+                  Any unused initial budget is credited for withdrawal after resolution.
+                </div>
+              </div>
+            </div>
+          )}
+          {state === 4 && (
+            <div className="card join-card" style={{ borderLeft: "4px solid var(--accent)" }}>
+              <div className="card-pad join-card-inner">
+                <div><div className="card-title">Agent stage failed</div><div className="card-subtitle">Retry immediately, or recover escrow after the one-day safety delay.</div></div>
+                <div className="right-actions">
+                  <button className="btn btn-dark" onClick={retryFailedStage} disabled={busy}>Retry failed stage</button>
+                  <button className="btn btn-outline" onClick={recoverFailedDispute} disabled={busy}>Recover escrow</button>
+                  <button className="btn btn-outline" onClick={withdrawFunds} disabled={busy}>Withdraw credited funds</button>
                 </div>
               </div>
             </div>
@@ -1449,19 +1505,11 @@ function LiveHearing({ events, activeDispute, disputeId, loadReceipt, caseList, 
   );
 }
 
-function Verdict({ activeDispute, disputeId, loadReceipt, shareVerdict, caseList, loadSelectedCase, loadingCases, finalizeAppealDispute, busy, verdictTxHash, createTxHash, arbitrationTxHash }) {
+function Verdict({ activeDispute, disputeId, loadReceipt, shareVerdict, withdrawFunds, caseList, loadSelectedCase, loadingCases, busy, verdictTxHash, createTxHash, arbitrationTxHash }) {
   const confidence = Number(activeDispute?.confidence || 0);
   const winner = activeDispute?.winner ? shortAddress(activeDispute.winner) : "Awaiting verdict";
   const reasoning = activeDispute?.verdictReasoning || "No verdict has been delivered for this case yet.";
   const verdictReady = Boolean(activeDispute?.verdictJson);
-
-  const state = Number(activeDispute?.state ?? -1);
-  const isAppealWindow = state === 4;
-  const deadlineMs = Number(activeDispute?.appealDeadline || 0) * 1000;
-  const appealExpired = deadlineMs > 0 && new Date().getTime() >= deadlineMs;
-  const timeRemainingStr = deadlineMs > 0 && !appealExpired
-    ? new Date(deadlineMs).toLocaleString()
-    : "";
 
   const [winnerBalance, setWinnerBalance] = useState("");
 
@@ -1479,11 +1527,7 @@ function Verdict({ activeDispute, disputeId, loadReceipt, shareVerdict, caseList
     }
   }, [activeDispute?.winner]);
 
-  // Stake calculation math
-  const held = BigInt(activeDispute?.heldAmount || "0");
-  const totalStake = state === 4 ? held * 5n : (held > 0n ? held : ethers.parseEther("20"));
-  const payoutReleased = totalStake * 80n / 100n;
-  const heldAmount = totalStake * 20n / 100n;
+  const totalStake = BigInt(activeDispute?.plaintiffDeposit || "0") + BigInt(activeDispute?.defendantDeposit || "0");
 
   return (
     <div className="page active">
@@ -1513,32 +1557,10 @@ function Verdict({ activeDispute, disputeId, loadReceipt, shareVerdict, caseList
             <div className="verdict-reason">{verdictReady ? `"${reasoning}"` : "No verdict has been recorded for this case yet."}</div>
           </div>
           <div className="verdict-meta-row">
-            <Meta label="Winner receives" value={!verdictReady ? "Waiting" : confidence >= 90 ? "Full escrow" : confidence >= 60 ? "80% now" : "DAO review"} green={verdictReady && confidence >= 90} />
+            <Meta label="Winner receives" value={!verdictReady ? "Waiting" : activeDispute?.winner ? "Full escrow credit" : "Split escrow credit"} green={verdictReady} />
             <Meta label="Verdict issued" value={verdictReady ? "On-chain" : "Pending"} />
             <Meta label="Auto-executed" value={verdictReady ? "✓ Yes" : "Pending"} green={verdictReady} />
           </div>
-
-          {isAppealWindow && (
-            <div className="card join-card" style={{ borderLeft: "4px solid var(--accent)" }}>
-              <div className="card-pad join-card-inner">
-                <div>
-                  <div className="card-title">Case in Appeal Window (20% held in escrow)</div>
-                  <div className="card-subtitle">
-                    {appealExpired
-                       ? "The 7-day appeal window has expired. You can now finalize the appeal to release the remaining funds."
-                       : `The 7-day appeal window is active. Remaining funds can be claimed after: ${timeRemainingStr}`}
-                  </div>
-                </div>
-                <button
-                  className="btn btn-dark"
-                  onClick={finalizeAppealDispute}
-                  disabled={busy || !appealExpired}
-                >
-                  {busy ? "Finalizing..." : "Finalize Appeal & Release Escrow"}
-                </button>
-              </div>
-            </div>
-          )}
 
           <div className="card tx-card">
             <div className="card-header"><div className="card-title">Transaction details & explorer links</div></div>
@@ -1550,8 +1572,7 @@ function Verdict({ activeDispute, disputeId, loadReceipt, shareVerdict, caseList
                   <TxRow label="Agent budget" value={`${formatStt(activeDispute.agentBudget)} STT`} />
                   <TxRow label="Winner Address" value={activeDispute.winner ? activeDispute.winner : "None"} />
                   <TxRow label="Total Escrow Stake" value={`${formatStt(totalStake)} STT`} />
-                  <TxRow label="Immediate Payout (80%)" value={`${formatStt(payoutReleased)} STT`} green />
-                  <TxRow label="Held in Appeal Window (20%)" value={`${formatStt(heldAmount)} STT`} />
+                  <TxRow label="Payout model" value="Credited for secure withdrawal" green />
                   {winnerBalance && (
                     <TxRow label="Winner Wallet Balance (On-Chain)" value={`${winnerBalance} STT`} green />
                   )}
@@ -1598,6 +1619,7 @@ function Verdict({ activeDispute, disputeId, loadReceipt, shareVerdict, caseList
           </div>
           <div className="form-actions">
             <button className="btn btn-dark" onClick={() => loadReceipt()} disabled={!activeDispute?.latestRequestId}>View audit receipt →</button>
+            <button className="btn btn-outline" onClick={withdrawFunds} disabled={busy}>Withdraw credited funds</button>
             <button className="btn btn-outline" onClick={shareVerdict} disabled={!verdictReady}>Share verdict</button>
           </div>
         </>
@@ -1606,44 +1628,8 @@ function Verdict({ activeDispute, disputeId, loadReceipt, shareVerdict, caseList
   );
 }
 
-function Receipt({ receipt, activeDispute, disputeId, caseList, loadSelectedCase, loadingCases, loadReceipt, receiptLoading, receiptError }) {
-  const hasReceipt = Boolean(receipt);
-  
-  const displayReceipt = receipt || (activeDispute && activeDispute.latestRequestId ? {
-    requestId: activeDispute.latestRequestId,
-    steps: [
-      {
-        name: "request",
-        timestamp: "Step 1",
-        body_preview: `Invoked Gavel Dispute Escrow Agent Pipeline (Request ID: ${activeDispute.latestRequestId}) with Agent Budget: ${formatStt(activeDispute.agentBudget)} STT.`
-      },
-      activeDispute.plaintiffEvidenceUrl ? {
-        name: "scrape_plaintiff",
-        timestamp: "Step 2",
-        body_preview: `Scraping plaintiff evidence URL: ${activeDispute.plaintiffEvidenceUrl}`
-      } : null,
-      activeDispute.plaintiffSummary ? {
-        name: "extract_plaintiff_claims",
-        timestamp: "Step 3",
-        body_preview: `LLM parsed plaintiff claims: ${activeDispute.plaintiffSummary}`
-      } : null,
-      activeDispute.defendantEvidenceUrl ? {
-        name: "scrape_defendant",
-        timestamp: "Step 4",
-        body_preview: `Scraping defendant evidence URL: ${activeDispute.defendantEvidenceUrl}`
-      } : null,
-      activeDispute.defendantSummary ? {
-        name: "extract_defendant_claims",
-        timestamp: "Step 5",
-        body_preview: `LLM parsed defendant claims: ${activeDispute.defendantSummary}`
-      } : null,
-      activeDispute.verdictJson ? {
-        name: "judge_deliberation",
-        timestamp: "Step 6",
-        body_preview: `Judge Agent Inference complete. Verdict JSON: ${activeDispute.verdictJson}`
-      } : null
-    ].filter(Boolean)
-  } : null);
+function Receipt({ receipt, activeDispute, disputeId, caseList, loadSelectedCase, loadingCases, loadReceipt, receiptLoading, receiptError, setNotice }) {
+  const displayReceipt = receipt;
 
   async function exportReceipt() {
     const dataToExport = displayReceipt;
@@ -1676,8 +1662,8 @@ function Receipt({ receipt, activeDispute, disputeId, caseList, loadSelectedCase
   }
 
   React.useEffect(() => {
-    if (activeDispute?.latestRequestId && !receipt && !loadingCases) {
-      loadReceipt(activeDispute.latestRequestId);
+    if (activeDispute?.requestIds?.length && !receipt && !loadingCases) {
+      loadReceipt();
     }
   }, [activeDispute?.latestRequestId]);
 
@@ -1714,14 +1700,14 @@ function Receipt({ receipt, activeDispute, disputeId, caseList, loadSelectedCase
             <div className="receipt-top-actions">
               <span className="badge badge-green">
                 <span className="badge-dot" />
-                {displayReceipt ? "Ready (On-chain verified)" : "Waiting for request ID"}
+                {displayReceipt ? "Validator receipts loaded" : "Waiting for receipt service"}
               </span>
               <button className="btn btn-outline" onClick={exportReceipt} disabled={!displayReceipt}>Copy JSON</button>
               <button className="btn btn-dark" onClick={downloadReceipt} disabled={!displayReceipt}>Download JSON</button>
             </div>
           </div>
           <div className="card">
-            <div className="card-header"><div><div className="card-title">Execution receipt</div><div className="card-subtitle">{displayReceipt ? "On-chain audit steps from agent invocation" : "No receipt for this case yet"}</div></div></div>
+            <div className="card-header"><div><div className="card-title">Validator execution receipts</div><div className="card-subtitle">{displayReceipt ? "Execution traces from Somnia validators; the consensus result is recorded onchain" : receiptLoading ? "Loading Somnia receipts..." : receiptError || "No receipts indexed yet"}</div></div></div>
             <ReceiptTimeline receipt={displayReceipt} />
           </div>
           <div className="receipt-note">🔏 Receipt results are auditable; callback result controls escrow.</div>
@@ -1755,10 +1741,6 @@ function CaseTable({ setPage, caseList, loadSelectedCase, loadReceipt, compact }
             key={row.id}
             onClick={() => {
               loadSelectedCase(row.id);
-              if (row.action.page === "receipt" && row.latestRequestId) {
-                loadReceipt(row.latestRequestId);
-                return;
-              }
               setPage(row.action.page);
             }}
           >
@@ -1782,12 +1764,29 @@ function ReceiptTimeline({ receipt }) {
     return <div className="receipt-timeline"><div className="empty-state">This case has no receipt yet. Start arbitration to generate a Somnia audit trail.</div></div>;
   }
 
-  const steps = receipt.steps || receipt?.events || [];
-  return <div className="receipt-timeline">{steps.map((step, index) => Array.isArray(step) ? <ReceiptStep key={step[0]} name={step[0]} time={step[1]} detail={step[2]} code={step[3]} /> : <ReceiptStep key={index} name={step.name} time={step.timestamp || ""} detail={step.body_preview || step.output || JSON.stringify(step)} code={JSON.stringify(step)} />)}</div>;
+  const manifests = receipt.manifests || [];
+  if (manifests.length > 0) {
+    return <div className="receipt-timeline">{manifests.flatMap((manifest, stageIndex) =>
+      (manifest.receipts || []).map((validatorReceipt, validatorIndex) => (
+        <ReceiptStep
+          key={`${manifest.requestId}-${validatorReceipt.agentRunnerAddress || validatorIndex}`}
+          name={`${stageName(stageIndex + 1)} - validator ${validatorIndex + 1}`}
+          time={`${validatorReceipt.elapsedMs || 0} ms`}
+          detail={`Request #${manifest.requestId} | ${validatorReceipt.status} | ${validatorReceipt.agentRunnerAddress || "validator"}`}
+          code={JSON.stringify(validatorReceipt, null, 2)}
+        />
+      ))
+    )}</div>;
+  }
+  return <div className="receipt-timeline"><div className="empty-state">Somnia has not indexed validator receipts for these requests yet.</div></div>;
 }
 
-function VerdictStep({ name, sub, done, active }) {
-  return <div className="vc-step"><div className={`vc-step-icon ${done ? "step-done" : ""} ${active ? "step-active" : ""}`}>{done ? "✓" : "⟳"}</div><div className="vc-step-text"><div className="vc-step-name">{name}</div><div className="vc-step-sub">{sub}</div></div></div>;
+function JuryStage({ number, name, detail, tone, wide }) {
+  return <div className={`jury-stage jury-stage-${tone} ${wide ? "jury-stage-wide" : ""}`}>
+    <span className="jury-stage-number">{number}</span>
+    <div><strong>{name}</strong><span>{detail}</span></div>
+    <span className="jury-stage-status">Automatic</span>
+  </div>;
 }
 function StepCard({ num, icon, title, text }) { return <div className="step-card"><div className="step-num">{num}</div><div className="step-icon-box">{icon}</div><h3>{title}</h3><p>{text}</p></div>; }
 function UseCase({ icon, title, text, tag }) { return <div className="usecase-card"><div className="usecase-icon">{icon}</div><h3>{title}</h3><p>{text}</p><div className="usecase-tag">→ {tag}</div></div>; }
@@ -1957,17 +1956,18 @@ function StatusBadge({ status }) { const cls = status === "Resolved" ? "badge-gr
 
 function agentCopy(name) {
   return {
-    "Research Agent": "Fetches and parses all evidence URLs using Somnia's LLM Parse Website.",
-    "Validator Agent": "Cross-checks claims using JSON API Request and flags inconsistencies.",
-    "Skeptic Agent": "Stress-tests both sides and scores evidence quality using LLM Inference.",
-    "Judge Agent": "Synthesises outputs into a final structured verdict with confidence."
+    "Plaintiff Research": "Extracts factual claims and supporting details from the plaintiff evidence.",
+    "Defendant Research": "Builds an independent factual record from the defendant evidence.",
+    "Evidence Validator": "Checks accessibility, contradictions, timestamps, and claim support.",
+    "Skeptic": "Challenges both arguments and identifies unsupported conclusions.",
+    "Final Judge": "Synthesises every prior output into a strict, binding verdict."
   }[name];
 }
 
 function safeParse(contract, log) {
   try { return contract.interface.parseLog(log); } catch { return null; }
 }
-function stageName(stage) { return ["None", "Research", "Research", "Judge"][stage] || "Agent"; }
+function stageName(stage) { return ["None", "Plaintiff Research", "Defendant Research", "Validator", "Skeptic", "Judge"][stage] || "Agent"; }
 function shortAddress(value) { if (!value) return "0x..."; return `${value.slice(0, 6)}...${value.slice(-4)}`; }
 
 createRoot(document.getElementById("root")).render(<Root />);
