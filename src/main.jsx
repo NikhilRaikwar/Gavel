@@ -262,6 +262,7 @@ function App() {
   const [arbitrationTxHash, setArbitrationTxHash] = useState("");
   const [receiptLoading, setReceiptLoading] = useState(false);
   const [receiptError, setReceiptError] = useState("");
+  const [walletWithdrawable, setWalletWithdrawable] = useState(0n);
   const previousAddressRef = useRef("");
 
   const readContract = useMemo(() => {
@@ -289,6 +290,7 @@ function App() {
       setCaseEvents({});
       setLoadingCases(false);
       setReceipt(null);
+      setWalletWithdrawable(0n);
       return;
     }
 
@@ -453,7 +455,11 @@ function App() {
     if (!readContract || !address) return [];
     setLoadingCases(true);
     try {
-      const ids = await readContract.getPartyCaseIds(address);
+      const [ids, withdrawableAmount] = await Promise.all([
+        readContract.getPartyCaseIds(address),
+        readContract.withdrawable(address)
+      ]);
+      setWalletWithdrawable(withdrawableAmount);
       const disputes = await Promise.all(
         ids.map(async (id) => {
           const [dispute, requestIds] = await Promise.all([readContract.getDispute(id), readContract.getStageRequestIds(id)]);
@@ -681,6 +687,7 @@ function App() {
       const contract = await contractPromise;
       const tx = await contract.withdraw();
       await tx.wait();
+      setWalletWithdrawable(0n);
       setNotice(`${formatStt(amount)} STT withdrawn.`);
       await loadMyCases(disputeId);
     } catch (error) {
@@ -946,6 +953,7 @@ function App() {
       arbitrationTxHash={arbitrationTxHash}
       receiptLoading={receiptLoading}
       receiptError={receiptError}
+      walletWithdrawable={walletWithdrawable}
     />
   );
 }
@@ -1250,6 +1258,9 @@ function Overview({ setPage, caseList, loadingCases, loadSelectedCase, loadRecei
   const totalCases = caseList.length;
   const activeCases = caseList.filter((entry) => Number(entry.state) >= 0 && Number(entry.state) <= 4).length;
   const resolvedCases = caseList.filter((entry) => Number(entry.state) === 5).length;
+  const completedPipelines = caseList.filter((entry) => entry.requestIds?.length === 5 && Number(entry.state) === 5).length;
+  const pipelineCoverage = totalCases > 0 ? Math.round((completedPipelines / totalCases) * 100) : 0;
+  const resolutionCoverage = totalCases > 0 ? Math.round((resolvedCases / totalCases) * 100) : 0;
   const lockedStake = caseList.reduce(
     (sum, entry) => sum + BigInt(entry.plaintiffDeposit || "0") + BigInt(entry.defendantDeposit || "0"),
     0n
@@ -1268,8 +1279,9 @@ function Overview({ setPage, caseList, loadingCases, loadSelectedCase, loadRecei
       </div>
       <div className="overview-grid">
         <div className="card metric-card">
-          <div className="card-title">Agent performance</div>
-          {["Research Agent", "Judge Agent"].map((agent, index) => <ProgressRow key={agent} label={agent} value={[98, 100][index]} />)}
+          <div className="card-title">Autonomous pipeline proof</div>
+          <ProgressRow label="Completed all five agent stages" value={pipelineCoverage} />
+          <ProgressRow label="Reached an on-chain verdict" value={resolutionCoverage} />
         </div>
         <div className="card metric-card">
           <div className="card-title">Verdict distribution</div>
@@ -1505,11 +1517,18 @@ function LiveHearing({ events, activeDispute, disputeId, loadReceipt, caseList, 
   );
 }
 
-function Verdict({ activeDispute, disputeId, loadReceipt, shareVerdict, withdrawFunds, caseList, loadSelectedCase, loadingCases, busy, verdictTxHash, createTxHash, arbitrationTxHash }) {
+function Verdict({ activeDispute, disputeId, loadReceipt, shareVerdict, withdrawFunds, caseList, loadSelectedCase, loadingCases, busy, verdictTxHash, createTxHash, arbitrationTxHash, walletWithdrawable }) {
   const confidence = Number(activeDispute?.confidence || 0);
-  const winner = activeDispute?.winner ? shortAddress(activeDispute.winner) : "Awaiting verdict";
   const reasoning = activeDispute?.verdictReasoning || "No verdict has been delivered for this case yet.";
   const verdictReady = Boolean(activeDispute?.verdictJson);
+  const isSplitVerdict = verdictReady && !activeDispute?.winner;
+  const winner = !verdictReady ? "Awaiting verdict" : isSplitVerdict ? "Split verdict" : shortAddress(activeDispute.winner);
+  const availableCredit = BigInt(walletWithdrawable || 0);
+  const payoutStatus = availableCredit > 0n
+    ? `${formatStt(availableCredit)} STT ready to withdraw`
+    : verdictReady
+      ? "No pending withdrawal - credited funds already withdrawn"
+      : "Awaiting verdict";
 
   const [winnerBalance, setWinnerBalance] = useState("");
 
@@ -1570,8 +1589,8 @@ function Verdict({ activeDispute, disputeId, loadReceipt, shareVerdict, withdraw
                   <TxRow label="Latest request ID" value={activeDispute.latestRequestId} />
                   <TxRow label="State" value={activeDispute.stateLabel} />
                   <TxRow label="Agent budget" value={`${formatStt(activeDispute.agentBudget)} STT`} />
-                  <TxRow label="Winner Address" value={activeDispute.winner ? activeDispute.winner : "None"} />
-                  <TxRow label="Total Escrow Stake" value={`${formatStt(totalStake)} STT`} />
+                  <TxRow label="Winner Address" value={activeDispute.winner ? activeDispute.winner : "Not applicable - split verdict"} />
+                  <TxRow label="Escrow currently locked" value={`${formatStt(totalStake)} STT`} />
                   <TxRow label="Payout model" value="Credited for secure withdrawal" green />
                   {winnerBalance && (
                     <TxRow label="Winner Wallet Balance (On-Chain)" value={`${winnerBalance} STT`} green />
@@ -1596,21 +1615,17 @@ function Verdict({ activeDispute, disputeId, loadReceipt, shareVerdict, withdraw
                       } 
                     />
                   )}
-                  {verdictTxHash ? (
+                  {verdictTxHash && (
                     <TxRow 
-                      label="Verdict & Payout Transaction" 
+                      label="Verdict Transaction"
                       value={
                         <a href={`https://shannon-explorer.somnia.network/tx/${verdictTxHash}`} target="_blank" rel="noopener noreferrer" className="action-link">
-                          View Verdict & Payout Transaction
+                          View Verdict Transaction
                         </a>
                       } 
                     />
-                  ) : (
-                    <TxRow 
-                      label="Payout Status" 
-                      value={activeDispute.winner ? "Transferred on-chain (Transaction hash indexing...)" : "Awaiting Payout"} 
-                    />
                   )}
+                  <TxRow label="Connected Wallet Payout" value={payoutStatus} green={verdictReady} />
                 </>
               ) : (
                 <div className="empty-state">This case is still waiting for arbitration, so there is no verdict receipt to show yet.</div>
@@ -1619,7 +1634,7 @@ function Verdict({ activeDispute, disputeId, loadReceipt, shareVerdict, withdraw
           </div>
           <div className="form-actions">
             <button className="btn btn-dark" onClick={() => loadReceipt()} disabled={!activeDispute?.latestRequestId}>View audit receipt →</button>
-            <button className="btn btn-outline" onClick={withdrawFunds} disabled={busy}>Withdraw credited funds</button>
+            <button className="btn btn-outline" onClick={withdrawFunds} disabled={busy || availableCredit === 0n}>Withdraw credited funds</button>
             <button className="btn btn-outline" onClick={shareVerdict} disabled={!verdictReady}>Share verdict</button>
           </div>
         </>
@@ -1730,7 +1745,7 @@ function CaseTable({ setPage, caseList, loadSelectedCase, loadReceipt, compact }
           <th>Case ID</th>
           <th>Description</th>
           <th>Role</th>
-          <th>Stake</th>
+          <th>Locked now</th>
           <th>Status</th>
           <th>Action</th>
         </tr>
