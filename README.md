@@ -1,345 +1,321 @@
-# Gavel
+# Gavel - Autonomous Onchain Dispute Resolution
 
-[![Somnia](https://img.shields.io/badge/Built%20for-Somnia%20Testnet-0B1F4B?style=for-the-badge&logo=ethereum&logoColor=white)](https://www.somnia.network/)
+[![Somnia](https://img.shields.io/badge/Built%20for-Somnia%20Agentathon%202026-0B1F4B?style=for-the-badge&logo=ethereum&logoColor=white)](https://www.somnia.network/)
 [![Chain ID](https://img.shields.io/badge/Chain%20ID-50312-0EA5E9?style=for-the-badge)](https://shannon-explorer.somnia.network)
 [![Agents](https://img.shields.io/badge/Somnia%20Agents-Live-7C3AED?style=for-the-badge)](https://agents.testnet.somnia.network)
-[![Hardhat](https://img.shields.io/badge/Hardhat-Smart%20Contracts-F97316?style=for-the-badge)](https://hardhat.org/)
-[![Vite](https://img.shields.io/badge/Vite-Frontend-22C55E?style=for-the-badge)](https://vite.dev/)
-[![React](https://img.shields.io/badge/React-UI-06B6D4?style=for-the-badge)](https://react.dev/)
+[![Tests](https://img.shields.io/badge/Tests-38%20passing-22C55E?style=for-the-badge)](test/DisputeEscrowV2.test.js)
 [![License: MIT](https://img.shields.io/badge/License-MIT-111827?style=for-the-badge)](LICENSE)
 
-Gavel is an autonomous dispute-resolution protocol for Somnia testnet. Two parties stake equal value, submit public evidence, and trigger a five-stage validator-executed agent jury that records a strict-format consensus verdict onchain.
+> **Primary submission:** `DisputeEscrowV2.sol`, the five-stage autonomous agent jury.
+> `DisputeEscrow.sol` (V1) is retained for reference only.
 
-- **Presentation Deck**: [Gavel Slide Deck Presentation](https://gavel-nine.vercel.app/gavel-slides)
-- **Demo Video**: [Watch on YouTube](https://youtu.be/bglHEuVNnBA)
+Gavel is an autonomous dispute-resolution protocol on Somnia testnet. Two parties lock equal stakes, submit public evidence URLs, and launch a five-stage chain of Somnia validator-executed agents. The consensus result is returned through authenticated callbacks, validated by the contract, and used to credit escrow for secure withdrawal.
 
-The project uses:
-- Somnia Agents for evidence extraction and verdict inference
-- A Solidity escrow contract with callback-based agent requests
-- A React/Vite dashboard for users to create disputes and follow the live hearing
+- **Live app:** [gavel-nine.vercel.app](https://gavel-nine.vercel.app)
+- **Demo video:** [Watch on YouTube](https://youtu.be/bglHEuVNnBA)
+- **Presentation deck:** [Gavel slide deck](https://gavel-nine.vercel.app/gavel-slides)
+- **Judge guide:** [SOMNIA_JUDGING.md](SOMNIA_JUDGING.md)
 
-## Project Snapshot
+## Why Gavel Needs Somnia
 
-### Problem
+Public evidence is unstructured and lives outside the chain, while the verdict controls funds onchain. A normal AI API or single oracle would become a trusted arbiter.
 
-Disputes are slow, expensive, and hard to verify when evidence lives across public URLs, private messages, and off-chain coordination. Traditional escrow systems need a human arbiter or a backend service that users must trust.
+Somnia Agents let validators execute the evidence parsing and inference jobs, reach consensus, and callback into the escrow contract. One arbitration transaction starts the pipeline; later stages advance automatically without a human judge, keeper, or project-operated backend.
 
-### Solution
+Somnia's EVM compatibility allows the escrow state machine to use standard Solidity and Hardhat tooling. Its low-cost, high-performance architecture matters because a single Gavel case creates five agent requests and multiple validator execution records.
 
-Gavel turns dispute resolution into an on-chain workflow. Both parties stake equally, submit evidence URLs, and let Somnia validator-executed agents extract claims and return a deterministic verdict with audit receipts.
+## Gavel vs Human-Juror Arbitration
 
-### Somnia Integration
+Kleros and similar systems coordinate human token-staked jurors. Gavel explores a different model:
 
-- Two evidence-research stages use the Somnia LLM Parse Website agent
-- Validator, skeptic, and final-judge stages use the Somnia LLM Inference agent
-- Requests are routed through the SomniaAgents platform contract
-- Consensus results are delivered through authenticated contract callbacks
-- Per-validator execution receipts are available from Somnia's receipt service
+| Area | Human-juror protocols | Gavel V2 |
+|---|---|---|
+| Decision makers | Selected human jurors | Somnia validator-executed AI agents |
+| Coordination | Voting and incentive process | Five sequential consensus-validated requests |
+| Time model | Human response windows | Agent execution and callback pipeline |
+| Cost model | Juror incentives plus gas | Somnia request budget plus gas |
+| Evidence | Reviewed manually | Public URLs parsed by Somnia agents |
+| Enforcement | Contract applies juror result | Contract validates agent verdict and credits escrow |
+| Audit trail | Onchain votes | Onchain request IDs/results plus Somnia validator receipts |
 
-### V2 Security And Reliability
+Gavel does not claim that validator receipts themselves are stored onchain. The request IDs, callback result, case state, verdict, and escrow credits are onchain. Per-validator execution receipts are served by Somnia's receipt service.
 
-- Strict `GAVEL_V1|winner|confidence|reasoning` verdict format; malformed verdicts cannot move escrow
-- Pull-payment withdrawals prevent receiver contracts from blocking verdict completion
-- Failed or timed-out stages can be retried, or parties can recover escrow after a safety delay
-- Every stage request ID is stored onchain and linked to its validator receipts
-- Party-indexed case discovery avoids scanning every dispute
-- Expiry is limited to pre-arbitration states and cannot erase active escrow
-- Remaining initial agent budget is credited back to the arbitration funder
-- Platform rebates are tracked separately because Somnia currently returns them without a request identifier
+## Five-Stage Autonomous Jury
 
-### Deployment Status
+1. **Plaintiff Research** - LLM Parse Website extracts claims from the plaintiff evidence URL.
+2. **Defendant Research** - LLM Parse Website extracts claims from the defendant evidence URL.
+3. **Validator** - LLM Inference checks support, contradictions, timestamps, and missing evidence.
+4. **Skeptic** - LLM Inference challenges both sides and highlights weak conclusions.
+5. **Judge** - LLM Inference returns `GAVEL_V1|winner|confidence|reasoning`.
 
-- Deployed on Somnia testnet
-- V2 verification submitted through the repository tooling; the Shannon explorer API currently reports the deployed address as unindexed even though RPC bytecode is live
-- Frontend configured to use the deployed contract address
-- Wallet-gated landing page and dashboard flow are active
-
-### Demo Flow
-
-1. Connect wallet on the landing page
-2. Switch to Somnia testnet if needed
-3. Create a dispute and lock escrow
-4. Submit evidence URLs for both parties
-5. Request arbitration with the minimum agent budget
-6. Watch the live hearing and open the receipt
-7. Disconnect the wallet to return to the landing page
-
-## What Gavel Does
-
-- Locks equal stakes from both parties into escrow
-- Collects evidence URLs from plaintiff and defendant
-- Calls Somnia LLM Parse Website agents to extract factual claims
-- Runs validator and skeptic deliberation before the final judge
-- Credits funds according to the onchain consensus verdict for secure withdrawal
-- Displays real per-validator Somnia receipt data for auditability
-
-## Live Somnia Setup
-
-- Testnet chain ID: `50312`
-- RPC: `https://api.infra.testnet.somnia.network`
-- V1 deployed contract: [0xdc9A2ea119467AADcee21258A54138A8B138f6c5](https://shannon-explorer.somnia.network/address/0xdc9A2ea119467AADcee21258A54138A8B138f6c5#code)
-- V2 deployed contract: [0xEd614e7A3A80fd26426c6780cC15cf9a4F003f21](https://shannon-explorer.somnia.network/address/0xEd614e7A3A80fd26426c6780cC15cf9a4F003f21#code)
-- SomniaAgents contract: [0x037Bb9C718F3f7fe5eCBDB0b600D607b52706776](https://shannon-explorer.somnia.network/address/0x037Bb9C718F3f7fe5eCBDB0b600D607b52706776#code)
-- AgentRegistry contract: [0x08D1Fc808f1983d2Ea7B63a28ECD4d8C885Cd02A](https://shannon-explorer.somnia.network/address/0x08D1Fc808f1983d2Ea7B63a28ECD4d8C885Cd02A#code)
-- LLM Parse Website agent ID: [12875401142070969085](https://agents.testnet.somnia.network/agent/12875401142070969085)
-- LLM Inference agent ID: [12847293847561029384](https://agents.testnet.somnia.network/agent/12847293847561029384)
-- JSON API Request agent ID: [13174292974160097713](https://agents.testnet.somnia.network/agent/13174292974160097713)
-
-## Somnia Agents Used
-
-```mermaid
-flowchart LR
-  classDef parse fill:#7c3aed,stroke:#3b0764,color:#ffffff,stroke-width:2px;
-  classDef infer fill:#0ea5e9,stroke:#082f49,color:#ffffff,stroke-width:2px;
-  classDef api fill:#f97316,stroke:#7c2d12,color:#ffffff,stroke-width:2px;
-  classDef infra fill:#111827,stroke:#374151,color:#ffffff,stroke-width:2px;
-  classDef use fill:#22c55e,stroke:#14532d,color:#ffffff,stroke-width:2px;
-
-  P[LLM Parse Website<br/>ID 12875401142070969085<br/>2 methods]:::parse
-  I[LLM Inference<br/>ID 12847293847561029384<br/>4 methods]:::infer
-  J[JSON API Request<br/>ID 13174292974160097713<br/>6 methods]:::api
-  S[SomniaAgents<br/>0x037Bb9C718F3f7fe5eCBDB0b600D607b52706776]:::infra
-  R[AgentRegistry<br/>0x08D1Fc808f1983d2Ea7B63a28ECD4d8C885Cd02A]:::infra
-
-  P -->|Extract evidence claims| U1[Gavel dispute evidence intake]:::use
-  I -->|Generate verdict JSON| U2[Gavel final judgment]:::use
-  J -->|Optional future oracle checks| U3[Evidence verification / v2]:::use
-  S --> P
-  S --> I
-  S --> J
-  R --> S
-```
-
-## How Gavel Uses Them
-
-- [LLM Parse Website](https://agents.testnet.somnia.network/agent/12875401142070969085)
-  - Used for plaintiff and defendant evidence URLs
-  - Extracts factual claims from public pages
-  - Powers the first two requests in the dispute pipeline
-
-- [LLM Inference](https://agents.testnet.somnia.network/agent/12847293847561029384)
-  - Used for the final judge step
-  - Returns winner, confidence, and reasoning
-  - Determines how escrow is released
-
-- [JSON API Request](https://agents.testnet.somnia.network/agent/13174292974160097713)
-  - Reserved for v2 evidence checks when sources are JSON APIs
-  - Not required for the MVP arbitration flow
-
-- [SomniaAgents contract](https://shannon-explorer.somnia.network/address/0x037Bb9C718F3f7fe5eCBDB0b600D607b52706776#code)
-  - Platform contract that receives requests and routes callbacks
-
-- [AgentRegistry contract](https://shannon-explorer.somnia.network/address/0x08D1Fc808f1983d2Ea7B63a28ECD4d8C885Cd02A#code)
-  - Registry layer for Somnia agents and explorer metadata
-
-## Prompt Library
-
-The live MVP uses inline prompt strings inside the Solidity contract, but the canonical human-readable prompt library lives here:
-
-- [Agent prompt library README](agents/prompt-library/README.md)
-- [Research prompt](agents/prompt-library/research.md)
-- [Validator prompt](agents/prompt-library/validator.md)
-- [Skeptic prompt](agents/prompt-library/skeptic.md)
-- [Judge prompt](agents/prompt-library/judge.md)
-
-This separation keeps the on-chain MVP deterministic while giving the team a clean place to evolve custom-agent prompts later.
-
-## Architecture
-
-```mermaid
-flowchart LR
-  classDef user fill:#0ea5e9,stroke:#082f49,color:#ffffff,stroke-width:2px;
-  classDef ui fill:#22c55e,stroke:#14532d,color:#ffffff,stroke-width:2px;
-  classDef chain fill:#7c3aed,stroke:#3b0764,color:#ffffff,stroke-width:2px;
-  classDef agent fill:#f97316,stroke:#7c2d12,color:#ffffff,stroke-width:2px;
-  classDef data fill:#14b8a6,stroke:#134e4a,color:#ffffff,stroke-width:2px;
-  classDef audit fill:#ef4444,stroke:#7f1d1d,color:#ffffff,stroke-width:2px;
-
-  U[User Wallet]:::user
-  UI[Gavel React Dashboard]:::ui
-  SC[DisputeEscrow.sol]:::chain
-  PA[Somnia Parse Website Agent]:::agent
-  IA[Somnia Inference Agent]:::agent
-  RC[Somnia Receipt Service]:::audit
-  EX[Evidence URLs]:::data
-  VF[Verdict + Fund Release]:::chain
-
-  U --> UI
-  UI --> SC
-  SC --> EX
-  SC --> PA
-  SC --> IA
-  PA --> SC
-  IA --> SC
-  SC --> VF
-  SC --> RC
-  RC --> UI
-```
-
-## AI Agent Flow
+The contract rejects malformed judge output. A failed stage becomes retryable; persistent failures can enter the escrow recovery path after the safety delay.
 
 ```mermaid
 flowchart TD
-  classDef start fill:#0f766e,stroke:#134e4a,color:#ffffff,stroke-width:2px;
-  classDef research fill:#f59e0b,stroke:#92400e,color:#ffffff,stroke-width:2px;
-  classDef judge fill:#8b5cf6,stroke:#4c1d95,color:#ffffff,stroke-width:2px;
-  classDef escrow fill:#10b981,stroke:#064e3b,color:#ffffff,stroke-width:2px;
-  classDef warn fill:#ef4444,stroke:#7f1d1d,color:#ffffff,stroke-width:2px;
-
-  A[Dispute created]:::start --> B[Both parties deposit equal stake]:::escrow
-  B --> C[Evidence URLs submitted]:::escrow
-  C --> D[Plaintiff evidence -> Parse Website agent]:::research
-  C --> E[Defendant evidence -> Parse Website agent]:::research
-  D --> F[Plaintiff summary stored on-chain]:::escrow
-  E --> G[Defendant summary stored on-chain]:::escrow
-  F --> H[Validator checks support and contradictions]:::judge
-  G --> H
-  H --> I[Skeptic challenges both sides]:::judge
-  I --> J[Judge returns strict GAVEL_V1 verdict]:::judge
-  J --> K[Escrow credited for secure withdrawal]:::escrow
+  A[Equal stakes locked] --> B[Both evidence URLs submitted]
+  B --> C[Plaintiff research]
+  C --> D[Defendant research]
+  D --> E[Validator]
+  E --> F[Skeptic]
+  F --> G[Final judge]
+  G --> H{Strict verdict valid?}
+  H -->|Yes| I[Credit escrow and refund unused budget]
+  H -->|No| J[Mark failed and allow retry or recovery]
+  I --> K[Users withdraw credited funds]
 ```
 
-## Request Funding Model
+## Live Deployment Proof
 
-Somnia requests must be funded with the operations reserve plus the runner execution budget:
+| Resource | Value |
+|---|---|
+| V2.1 primary contract | [0x0BCEF4b601A497Db5A57AC211Ed95d01ad009A4A](https://shannon-explorer.somnia.network/address/0x0BCEF4b601A497Db5A57AC211Ed95d01ad009A4A) |
+| V2 completed-case proof contract | [0xEd614e7A3A80fd26426c6780cC15cf9a4F003f21](https://shannon-explorer.somnia.network/address/0xEd614e7A3A80fd26426c6780cC15cf9a4F003f21) |
+| V1 contract (retired) | [0xdc9A2ea119467AADcee21258A54138A8B138f6c5](https://shannon-explorer.somnia.network/address/0xdc9A2ea119467AADcee21258A54138A8B138f6c5) |
+| SomniaAgents platform | [0x037Bb9C718F3f7fe5eCBDB0b600D607b52706776](https://shannon-explorer.somnia.network/address/0x037Bb9C718F3f7fe5eCBDB0b600D607b52706776) |
+| AgentRegistry | [0x08D1Fc808f1983d2Ea7B63a28ECD4d8C885Cd02A](https://shannon-explorer.somnia.network/address/0x08D1Fc808f1983d2Ea7B63a28ECD4d8C885Cd02A) |
+| LLM Parse Website agent | [12875401142070969085](https://agents.testnet.somnia.network/agent/12875401142070969085) |
+| LLM Inference agent | [12847293847561029384](https://agents.testnet.somnia.network/agent/12847293847561029384) |
+| Chain ID | `50312` |
+| RPC | `https://api.infra.testnet.somnia.network` |
 
-- Parse Website request: `0.33 STT`
-- Inference request: `0.24 STT`
-- Five-stage arbitration total: `1.38 STT` at the current testnet reserve and runner prices
+### Completed Case #0
 
-The contract enforces this by requiring the full minimum arbitration budget before starting the agent pipeline.
+| Proof | Value |
+|---|---|
+| Create transaction | [0xc978f538...30212b8](https://shannon-explorer.somnia.network/tx/0xc978f5380399c43a1614996cffaf6904cd76d85eaaf4febdc2049104830212b8) |
+| Arbitration transaction | [0x053d93da...ef7392](https://shannon-explorer.somnia.network/tx/0x053d93da672cd7e5a1ba4439497c01a815d3c7b72de1b921e814ff30d0ef7392) |
+| Plaintiff withdrawal | [0x853709e3...c3414](https://shannon-explorer.somnia.network/tx/0x853709e3c398023ebb494750fe7f6b7ace0054d4729ee536b72ab5ee117c3414) |
+| Stage request IDs | `5892205`, `5892264`, `5892316`, `5892338`, `5892357` |
+| Validator receipts | `15/15` successful execution traces |
+| Consensus verdict | Split, `60%` confidence |
+
+### Explorer Verification Note
+
+The primary V2.1 address contains the latest source and exposes `version() == "2.1.0"`. The earlier V2 address remains linked because it contains the completed five-stage case proof. Verify both deployments and current contract reads with:
+
+```bash
+npm run check:bytecode
+```
+
+The script verifies bytecode, configured agent IDs, subcommittee size, the live platform request deposit, `minimumAgentBudget()`, and `disputeCount()`. See [outputs/verify-output.txt](outputs/verify-output.txt) for the recorded Hardhat verification result.
+
+Shannon verification was submitted for V2.1 on June 12, 2026. The explorer currently responds `Address is not a smart-contract` while the Somnia RPC returns `18,644` bytes of live code. This is an explorer indexing delay; retry `npm run verify:somnia` after indexing completes.
+
+## Somnia Agent Integration
+
+```mermaid
+flowchart LR
+  U[Wallet] --> UI[React dashboard]
+  UI --> E[DisputeEscrowV2]
+  E --> P[Parse Website agent - stages 1 and 2]
+  E --> L[LLM Inference agent - stages 3 to 5]
+  P -->|Authenticated callback| E
+  L -->|Authenticated callback| E
+  E --> V[Onchain verdict and withdrawal credits]
+  R[Somnia receipt service] --> UI
+```
+
+### Agents Used
+
+**LLM Parse Website** (`ExtractString`) is used for plaintiff and defendant research. It fetches public evidence pages and extracts relevant claims.
+
+**LLM Inference** (`inferString`) is used for validator, skeptic, and judge roles through stage-specific prompts.
+
+**SomniaAgents platform** creates requests, manages request funding, and delivers callbacks to `handleResponse()`.
+
+The JSON API Request agent is documented as a future structured-evidence option. It is not part of the deployed V2 arbitration flow.
+
+## Agent Budget
+
+The V2 contract calculates the minimum dynamically:
+
+```text
+(2 x Parse Website request) + (3 x Inference request)
+= (2 x 0.33 STT) + (3 x 0.24 STT)
+= 1.38 STT at the current live platform deposit
+```
+
+| Stage | Current minimum |
+|---|---:|
+| Plaintiff Research | `0.33 STT` |
+| Defendant Research | `0.33 STT` |
+| Validator | `0.24 STT` |
+| Skeptic | `0.24 STT` |
+| Judge | `0.24 STT` |
+| **Current live total** | **`1.38 STT`** |
+
+The request deposit is controlled by the Somnia platform and can change. The frontend therefore has no hardcoded production fallback: it reads `minimumAgentBudget()` from the live contract before enabling arbitration. The local mock currently uses a `0.01 STT` deposit and calculates `1.28 STT`, but the deployed platform currently returns a `1.38 STT` total. Unused initial budget is credited back to the arbitration funder.
+
+## V2 Security and Reliability
+
+| Feature | Behavior |
+|---|---|
+| Strict verdict parser | Only valid `GAVEL_V1` output can resolve escrow |
+| Callback authentication | Only the configured Somnia platform can call `handleResponse()` |
+| Request-stage binding | Request ID, dispute ID, and expected stage must match |
+| Pull payments | A rejecting receiver cannot block verdict completion |
+| Retry path | Failed stages can restart with additional funding |
+| Timeout fallback | After 15 minutes, anyone can mark an undelivered stage callback as timed out so it becomes retryable |
+| Recovery path | Parties recover remaining escrow after the failure delay |
+| Evidence freeze | Evidence cannot change after arbitration begins |
+| URL and size bounds | Inputs and agent outputs are bounded |
+| Party case index | UI loads connected-wallet cases without scanning every dispute |
+| Budget accounting | Escrow, agent budget, rebates, and withdrawals remain separate |
+
+## Public Contract Interface
+
+- `createDispute`
+- `joinDispute`
+- `submitEvidence`
+- `requestArbitration`
+- `retryFailedStage`
+- `recoverFailedDispute`
+- `claimExpiry`
+- `withdraw`
+- `getDispute`
+- `getStageRequestIds`
+- `getPartyCaseIds`
+- `minimumAgentBudget`
+- `version`
+
+## Real-World Use Cases
+
+- Freelance milestone disputes backed by a specification and GitHub pull request
+- Marketplace disputes backed by listing pages and public evidence
+- DAO grants and bounty completion checks
+- B2B milestone escrow
+- Prediction market resolution from public sources
+- Parametric claims backed by public API or website evidence
 
 ## Tech Stack
 
-- Solidity `0.8.24`
-- Hardhat
-- React
-- Vite
-- RainbowKit + Wagmi
-- Ethers v6
-- Somnia testnet agents
+| Layer | Technology |
+|---|---|
+| Smart contracts | Solidity 0.8.24, Hardhat, viaIR optimizer |
+| Frontend | React 19, Vite, RainbowKit, Wagmi, Ethers v6 |
+| Chain | Somnia Testnet |
+| Agents | Somnia LLM Parse Website and LLM Inference |
+| Frontend deployment | Vercel |
+| Analytics | Vercel Analytics |
 
 ## Local Development
 
-1. Install dependencies:
+### Prerequisites
+
+- Node.js 18+
+- A Somnia testnet wallet funded with STT
+- MetaMask or another supported wallet
+
+### Setup
 
 ```bash
+git clone https://github.com/NikhilRaikwar/Gavel
+cd Gavel
 npm install
+cp .env.example .env
 ```
 
-2. Configure environment variables in `.env`:
+Configure `.env`:
 
 ```env
-PRIVATE_KEY=your_deployer_key
+PRIVATE_KEY=your_deployer_private_key
 SOMNIA_RPC_URL=https://api.infra.testnet.somnia.network
 SOMNIA_AGENTS_ADDRESS=0x037Bb9C718F3f7fe5eCBDB0b600D607b52706776
 PARSE_WEBSITE_AGENT_ID=12875401142070969085
 JUDGE_INFERENCE_AGENT_ID=12847293847561029384
-VITE_DISPUTE_ESCROW_ADDRESS=your_deployed_contract_address
-VITE_SITE_URL=https://gavel.example.com
+VITE_DISPUTE_ESCROW_ADDRESS=0x0BCEF4b601A497Db5A57AC211Ed95d01ad009A4A
+VITE_SITE_URL=https://gavel-nine.vercel.app
 ```
 
-3. Start the frontend:
+### Commands
 
 ```bash
 npm run frontend:dev
+npm run contracts:compile
+npm run test:v2
+npm run contracts:test
+npm run frontend:build
+npm run check:bytecode
 ```
 
-4. Compile contracts:
+## Deploy and Verify
 
 ```bash
-npm run contracts:compile
+npm run deploy:somnia
+npm run verify:somnia
 ```
 
-5. Run tests:
+After deploying a new contract, update `DISPUTE_ESCROW_ADDRESS` for verification and `VITE_DISPUTE_ESCROW_ADDRESS` for the frontend.
+
+## Live App Flow
+
+1. Open [gavel-nine.vercel.app](https://gavel-nine.vercel.app).
+2. Connect a wallet.
+3. Switch to Somnia Testnet, chain ID `50312`.
+4. Create a case with the defendant address, description, and stake.
+5. The defendant joins with the exact matching stake.
+6. Both parties submit public `http://` or `https://` evidence URLs.
+7. Either party starts arbitration using the live minimum budget.
+8. Watch all five stages in **Live Hearing**.
+9. Inspect the consensus verdict and transaction proof.
+10. Open **Audit Receipt** for Somnia validator execution records.
+11. Withdraw credited funds.
+
+## Test Coverage
+
+The suite covers:
+
+- case creation, joining, and party indexing
+- evidence URL rules and evidence freezing
+- all five request stages and stored request IDs
+- unauthorized, duplicate, empty, and malformed callbacks
+- strict winner and confidence parsing
+- plaintiff, defendant, and split verdicts
+- failed-stage retry and delayed recovery
+- expiry restrictions
+- agent budget refunds and platform rebate accounting
+- pull-payment withdrawals and rejecting receivers
+- source version identification
+
+Run the primary submission suite:
+
+```bash
+npm run test:v2
+```
+
+Run both V1 and V2:
 
 ```bash
 npm run contracts:test
 ```
 
-6. Build the app:
+Expected result: **38 passing tests**.
 
-```bash
-npm run frontend:build
-```
-
-## Deploy to Somnia Testnet
-
-```bash
-npm run deploy:somnia
-```
-
-After deployment:
-- Copy the deployed contract address into `DISPUTE_ESCROW_ADDRESS`
-- Copy the same address into `VITE_DISPUTE_ESCROW_ADDRESS`
-- Rebuild or restart the frontend
-
-## Verify on Somnia
-
-```bash
-npm run verify:somnia
-```
-
-## How to Use the App
-
-1. Open the landing page.
-2. Click `Connect wallet`.
-3. Connect a wallet and switch to Somnia testnet if prompted.
-4. Enter the dashboard.
-5. Create a dispute and lock escrow.
-6. Submit evidence URLs for both parties.
-7. Request arbitration with the dynamic minimum returned by `minimumAgentBudget()` (currently `1.38 STT`).
-8. Watch the live hearing and open the receipt after request creation.
-9. Disconnecting the wallet returns you to the landing page.
-
-## Testing Checklist
-
-### Smart Contract
-
-- `createDispute()` locks the plaintiff stake
-- `joinDispute()` requires matching defendant stake
-- `submitEvidence()` only accepts parties
-- `requestArbitration()` requires evidence from both sides
-- Agent callbacks only accept calls from the Somnia platform
-- Parse Website calls use `ExtractString(...)`
-- Inference calls use `inferString(...)`
-- Request funding respects the live Somnia deposit model
-
-### Frontend
-
-- Landing page requires wallet connection before entering the dashboard
-- Disconnecting wallet returns to the landing page
-- Somnia testnet chain is enforced
-- Receipt view loads from the Somnia receipts service
-- Receipt view displays all five request manifests and per-validator traces
-
-## Judging Criteria Proof Matrix
+## Judging Criteria
 
 | Criterion | Gavel V2 proof |
-| --- | --- |
-| Functionality | 35 passing contract tests, production frontend build, verified testnet deployment, recoverable failure states |
-| Agent-First Design | One user transaction launches five asynchronous Somnia agent stages that advance through authenticated callbacks |
-| Innovation | Validator and skeptic deliberation precede a strict-format judge verdict that controls escrow |
-| Autonomous Performance | Majority-consensus results, stored request IDs, retries, timeout recovery, pull withdrawals, and real validator receipts |
+|---|---|
+| **Functionality** | 38 passing tests, production frontend build, live deployment, completed case, and successful withdrawal |
+| **Agent-First Design** | One user transaction launches five sequential Somnia requests; callbacks autonomously advance the remaining stages |
+| **Innovation** | Validator and skeptic deliberation challenge evidence before a strict-format verdict controls escrow |
+| **Autonomous Performance** | Five stored request IDs, 15/15 live validator receipts, retries, recovery, budget refunds, and pull withdrawals |
 
-Receipts are transparency and debugging records served by Somnia. The final result, callback, case state, and fund credits are the onchain consensus-controlled components.
+## Honest Capability Boundary
 
-## V2 Live Proof
-
-- Contract: [0xEd614e7A3A80fd26426c6780cC15cf9a4F003f21](https://shannon-explorer.somnia.network/address/0xEd614e7A3A80fd26426c6780cC15cf9a4F003f21)
-- Case: `0`
-- Create transaction: [0xc978f5380399c43a1614996cffaf6904cd76d85eaaf4febdc2049104830212b8](https://shannon-explorer.somnia.network/tx/0xc978f5380399c43a1614996cffaf6904cd76d85eaaf4febdc2049104830212b8)
-- Arbitration transaction: [0x053d93da672cd7e5a1ba4439497c01a815d3c7b72de1b921e814ff30d0ef7392](https://shannon-explorer.somnia.network/tx/0x053d93da672cd7e5a1ba4439497c01a815d3c7b72de1b921e814ff30d0ef7392)
-- Stage request IDs: `5892205`, `5892264`, `5892316`, `5892338`, `5892357`
-- Receipt verification: all five requests returned three successful validator receipts, for `15/15` successful execution traces
-- Consensus verdict: split, `60%` confidence
-- Plaintiff withdrawal: [0x853709e3c398023ebb494750fe7f6b7ace0054d4729ee536b72ab5ee117c3414](https://shannon-explorer.somnia.network/tx/0x853709e3c398023ebb494750fe7f6b7ace0054d4729ee536b72ab5ee117c3414)
-
-The three expired V1 appeal windows were finalized before retirement: [case 0](https://shannon-explorer.somnia.network/tx/0x6932a88ee70c661aadffb40a8d860933cd52f4a834370e27cffdee8342f01d5d), [case 1](https://shannon-explorer.somnia.network/tx/0x4fcf8e0fee352e245c708f36e483495c92a4f4811efcf24e71ce8698c9269c13), and [case 2](https://shannon-explorer.somnia.network/tx/0x267998859a241d06ceb7d6a3811014dcffebe8a05641f62a825e92d091b82639).
+- V2 has five autonomous stages implemented with two Somnia base agent types and stage-specific prompts. It does not claim five separately deployed custom agent containers.
+- The deployed flow uses Parse Website and LLM Inference. JSON API Request is planned, not live.
+- Gavel advances through Somnia Agent callbacks. It does not currently use Somnia Native Reactivity.
+- Receipts are served by Somnia's receipt service. Consensus-controlled results and escrow state are onchain.
+- Other contracts and agents can call Gavel's public interface, but the demo does not yet show external agent discovery.
+- The latest V2.1 source is deployed at the primary address; the completed-case proof remains on the earlier V2 address.
 
 ## Security Notes
 
-- `.env` is ignored by git and should remain local only
-- `.env.example` is safe to commit because it contains placeholders and public addresses only
-- The deployed contract address is public, but private keys and API keys must never be committed
-- If a live private key was exposed outside this machine, rotate it immediately
+- `.env` is ignored by git and must remain local.
+- `.env.example` contains placeholders and public addresses only.
+- Never commit private keys or API keys.
+- Rotate any key that may have been exposed.
+
+## License
+
+MIT (c) 2026 Nikhil Raikwar

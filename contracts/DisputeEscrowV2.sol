@@ -3,6 +3,20 @@ pragma solidity ^0.8.24;
 
 import {IAgentRequester, IAgentRequesterHandler, Request, Response, ResponseStatus} from "./interfaces/IAgentRequester.sol";
 
+/**
+ * @title DisputeEscrowV2
+ * @author Nikhil Raikwar
+ * @notice Gavel - autonomous dispute resolution powered by Somnia Agents.
+ *
+ * Unlike human-juror protocols such as Kleros, Gavel uses Somnia
+ * validator-executed agents to run a five-stage pipeline:
+ * research -> research -> validate -> challenge -> judge.
+ *
+ * Consensus callbacks advance the escrow state without a project-operated
+ * arbiter or keeper. Validator execution records are exposed by Somnia's
+ * receipt service; the consensus result and escrow credits are recorded
+ * onchain.
+ */
 interface IParseWebsiteAgentV2 {
     function ExtractString(
         string memory key,
@@ -85,6 +99,7 @@ contract DisputeEscrowV2 is IAgentRequesterHandler {
 
     uint256 public constant EXPIRY = 7 days;
     uint256 public constant FAILURE_RECOVERY_DELAY = 1 days;
+    uint256 public constant STAGE_TIMEOUT = 15 minutes;
     uint256 public constant SUBCOMMITTEE_SIZE = 3;
     uint256 public constant LLM_PARSE_WEBSITE_COST_PER_AGENT = 0.10 ether;
     uint256 public constant LLM_INFERENCE_COST_PER_AGENT = 0.07 ether;
@@ -96,6 +111,7 @@ contract DisputeEscrowV2 is IAgentRequesterHandler {
     mapping(uint256 => Dispute) public disputes;
     mapping(uint256 => PendingRequest) public pendingRequests;
     mapping(uint256 => uint256[5]) private stageRequestIds;
+    mapping(uint256 => uint256) public stageRequestedAt;
     mapping(address => uint256[]) private partyCaseIds;
     mapping(address => uint256) public withdrawable;
     bool private locked;
@@ -128,6 +144,11 @@ contract DisputeEscrowV2 is IAgentRequesterHandler {
         platform = IAgentRequester(platform_);
         parseWebsiteAgentId = parseWebsiteAgentId_;
         inferenceAgentId = inferenceAgentId_;
+    }
+
+    /// @notice Returns the source contract version for UI and deployment identification.
+    function version() external pure returns (string memory) {
+        return "2.1.0";
     }
 
     function createDispute(address defendant, string calldata description) external payable returns (uint256 id) {
@@ -211,6 +232,17 @@ contract DisputeEscrowV2 is IAgentRequesterHandler {
         emit DisputeRecovered(id);
     }
 
+    /// @notice Permissionless fallback when the platform never delivers a timeout callback.
+    function markCurrentStageTimedOut(uint256 id) external {
+        Dispute storage d = _dispute(id);
+        require(d.state == DisputeState.Arbitrating, "Not arbitrating");
+        require(stageRequestedAt[id] != 0 && block.timestamp >= stageRequestedAt[id] + STAGE_TIMEOUT, "Stage still active");
+        uint256 requestId = stageRequestIds[id][uint8(d.currentStage) - 1];
+        require(pendingRequests[requestId].valid, "No pending request");
+        delete pendingRequests[requestId];
+        _failStage(id, requestId, d.currentStage, ResponseStatus.TimedOut, "Stage timeout fallback");
+    }
+
     function claimExpiry(uint256 id) external {
         Dispute storage d = _dispute(id);
         require(block.timestamp >= d.createdAt + EXPIRY, "Not expired");
@@ -246,6 +278,7 @@ contract DisputeEscrowV2 is IAgentRequesterHandler {
 
         Dispute storage d = disputes[pending.disputeId];
         require(d.state == DisputeState.Arbitrating && d.currentStage == pending.stage, "Unexpected callback");
+        stageRequestedAt[pending.disputeId] = 0;
         if (status != ResponseStatus.Success || responses.length == 0 || responses[0].status != ResponseStatus.Success) {
             _failStage(pending.disputeId, requestId, pending.stage, status, "Agent request failed");
             return;
@@ -308,6 +341,7 @@ contract DisputeEscrowV2 is IAgentRequesterHandler {
         require(d.agentBudget >= budget, "Agent budget exhausted");
         d.agentBudget -= budget;
         d.currentStage = stage;
+        stageRequestedAt[id] = block.timestamp;
 
         bytes memory payload = stage == RequestStage.PlaintiffResearch
             ? _parsePayload(d.plaintiffEvidenceUrl, _researchPrompt("plaintiff"))
@@ -409,6 +443,7 @@ contract DisputeEscrowV2 is IAgentRequesterHandler {
         d.defendantDeposit = 0;
         d.state = DisputeState.Resolved;
         d.currentStage = RequestStage.None;
+        stageRequestedAt[id] = 0;
         d.winner = winner;
         d.confidence = confidence;
         d.verdictReasoning = reasoning;
@@ -425,6 +460,7 @@ contract DisputeEscrowV2 is IAgentRequesterHandler {
 
     function _failStage(uint256 id, uint256 requestId, RequestStage stage, ResponseStatus status, string memory reason) internal {
         Dispute storage d = disputes[id];
+        stageRequestedAt[id] = 0;
         d.state = DisputeState.AgentFailed;
         d.failedStage = stage;
         d.failedAt = block.timestamp;

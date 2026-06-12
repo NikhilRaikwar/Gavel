@@ -1,0 +1,21 @@
+Command: npm run verify:somnia
+Date: 2026-06-12
+Primary address: 0x0BCEF4b601A497Db5A57AC211Ed95d01ad009A4A
+
+Result: HardhatVerifyError: Address is not a smart-contract
+
+The Shannon explorer API has not indexed the fresh V2.1 deployment yet.
+Direct Somnia RPC verification succeeds:
+
+- Bytecode: 18,644 bytes
+- version(): 2.1.0
+- parseWebsiteAgentId(): 12875401142070969085
+- inferenceAgentId(): 12847293847561029384
+- SUBCOMMITTEE_SIZE(): 3
+- minimumAgentBudget(): 1.38 STT
+
+Run:
+npm run check:bytecode
+
+Retry explorer verification after Shannon indexes the address:
+npm run verify:somnia

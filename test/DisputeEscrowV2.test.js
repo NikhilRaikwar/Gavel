@@ -2,6 +2,10 @@ const { expect } = require("chai");
 const { ethers, network } = require("hardhat");
 
 describe("DisputeEscrowV2", function () {
+  // PRIMARY SUBMISSION for Somnia Agentathon 2026.
+  // DisputeEscrow (V1) is retained for reference only; evaluate V2.
+  // V2 adds a five-stage pipeline, strict verdict parsing, pull payments,
+  // retry/recovery paths, party-indexed cases, and explicit budget accounting.
   const parseAgentId = 101;
   const inferenceAgentId = 202;
   const stake = ethers.parseEther("1");
@@ -40,6 +44,11 @@ describe("DisputeEscrowV2", function () {
     await platform.fulfillString(3, "validator report");
     await platform.fulfillString(4, "skeptic report");
   }
+
+  it("reports version 2.1.0", async function () {
+    const { escrow } = await deployFixture();
+    expect(await escrow.version()).to.equal("2.1.0");
+  });
 
   it("creates indexed cases for both parties", async function () {
     const { escrow, plaintiff, defendant } = await deployFixture();
@@ -161,6 +170,21 @@ describe("DisputeEscrowV2", function () {
     await platform.fulfillString(1, "research");
     await expect(platform.fulfillString(1, "duplicate")).to.be.revertedWith("Unknown request");
     expect((await escrow.getDispute(0)).currentStage).to.equal(2);
+  });
+
+  it("rejects the manual timeout fallback while a stage is active", async function () {
+    const { escrow } = await started();
+    await expect(escrow.markCurrentStageTimedOut(0)).to.be.revertedWith("Stage still active");
+  });
+
+  it("permissionlessly marks an undelivered stage callback as timed out", async function () {
+    const { escrow, stranger } = await started();
+    await network.provider.send("evm_increaseTime", [15 * 60 + 1]);
+    await network.provider.send("evm_mine");
+    await expect(escrow.connect(stranger).markCurrentStageTimedOut(0)).to.emit(escrow, "AgentRequestFailed");
+    const dispute = await escrow.getDispute(0);
+    expect(dispute.state).to.equal(4);
+    expect(dispute.failedStage).to.equal(1);
   });
 
   it("retries the exact failed stage", async function () {

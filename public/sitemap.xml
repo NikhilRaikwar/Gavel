@@ -1,35 +1,35 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
   <url>
-    <loc>https://gavel.example.com/</loc>
+    <loc>https://gavel-nine.vercel.app/</loc>
     <priority>1.0</priority>
   </url>
   <url>
-    <loc>https://gavel.example.com/?view=app&amp;page=overview</loc>
+    <loc>https://gavel-nine.vercel.app/?view=app&amp;page=overview</loc>
     <priority>0.9</priority>
   </url>
   <url>
-    <loc>https://gavel.example.com/?view=app&amp;page=cases</loc>
+    <loc>https://gavel-nine.vercel.app/?view=app&amp;page=cases</loc>
     <priority>0.8</priority>
   </url>
   <url>
-    <loc>https://gavel.example.com/?view=app&amp;page=create</loc>
+    <loc>https://gavel-nine.vercel.app/?view=app&amp;page=create</loc>
     <priority>0.8</priority>
   </url>
   <url>
-    <loc>https://gavel.example.com/?view=app&amp;page=evidence</loc>
+    <loc>https://gavel-nine.vercel.app/?view=app&amp;page=evidence</loc>
     <priority>0.8</priority>
   </url>
   <url>
-    <loc>https://gavel.example.com/?view=app&amp;page=arbitration</loc>
+    <loc>https://gavel-nine.vercel.app/?view=app&amp;page=arbitration</loc>
     <priority>0.7</priority>
   </url>
   <url>
-    <loc>https://gavel.example.com/?view=app&amp;page=verdict</loc>
+    <loc>https://gavel-nine.vercel.app/?view=app&amp;page=verdict</loc>
     <priority>0.7</priority>
   </url>
   <url>
-    <loc>https://gavel.example.com/?view=app&amp;page=receipt</loc>
+    <loc>https://gavel-nine.vercel.app/?view=app&amp;page=receipt</loc>
     <priority>0.7</priority>
   </url>
 </urlset>

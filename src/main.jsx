@@ -15,8 +15,8 @@ const SOMNIA_CHAIN_ID = 50312;
 const SOMNIA_RPC_URL = import.meta.env.VITE_SOMNIA_RPC_URL || "https://api.infra.testnet.somnia.network";
 const RECEIPTS_URL = "https://receipts.testnet.agents.somnia.host";
 const SOMNIA_AGENTS_ADDRESS = import.meta.env.VITE_SOMNIA_AGENTS_ADDRESS || "0x037Bb9C718F3f7fe5eCBDB0b600D607b52706776";
-const CONTRACT_ADDRESS = import.meta.env.VITE_DISPUTE_ESCROW_ADDRESS || "0xEd614e7A3A80fd26426c6780cC15cf9a4F003f21";
-const SITE_URL = import.meta.env.VITE_SITE_URL || "https://gavel.example.com";
+const CONTRACT_ADDRESS = import.meta.env.VITE_DISPUTE_ESCROW_ADDRESS || "0x0BCEF4b601A497Db5A57AC211Ed95d01ad009A4A";
+const SITE_URL = import.meta.env.VITE_SITE_URL || "https://gavel-nine.vercel.app";
 const SUPPORTED_PAGES = new Set(["overview", "cases", "create", "evidence", "arbitration", "verdict", "receipt"]);
 
 function getInitialUiState() {
@@ -36,7 +36,7 @@ function getSeoContent(view, page, activeDispute) {
     return {
       title: "Gavel - Onchain AI Court on Somnia",
       description:
-        "Gavel is a Somnia-powered onchain dispute resolution app that uses validator-executed AI agents to parse evidence, decide verdicts, and release escrow.",
+        "Gavel is a Somnia-powered dispute resolution app that uses validator-consensus AI agents to parse evidence, decide verdicts, and release onchain escrow.",
       keywords:
         "Gavel, Somnia, onchain AI, dispute resolution, escrow, smart contract arbitration, LLM Parse Website, LLM Inference, Somnia agents, blockchain court"
     };
@@ -79,7 +79,7 @@ function getSeoContent(view, page, activeDispute) {
     title: pageMap[page]?.title || "Gavel - Onchain AI Court on Somnia",
     description:
       pageMap[page]?.description ||
-      "Gavel is a Somnia-powered onchain dispute resolution app with validator-executed AI agents and audit receipts.",
+      "Gavel is a Somnia-powered dispute resolution app with validator-consensus AI agents and auditable execution receipts.",
     keywords:
       "Gavel, Somnia, dispute resolution, escrow, onchain AI, smart contract, receipt, arbitration, LLM Parse Website, LLM Inference"
   };
@@ -677,6 +677,23 @@ function App() {
     }
   }
 
+  async function markCurrentStageTimedOut() {
+    const contractPromise = await getWriteContract();
+    if (!contractPromise || !activeDispute || Number(activeDispute.state) !== 3) return;
+    setBusy(true);
+    try {
+      const contract = await contractPromise;
+      const tx = await contract.markCurrentStageTimedOut(disputeId);
+      await tx.wait();
+      setNotice("The unresponsive Somnia stage was marked timed out. It can now be retried.");
+      await loadMyCases(disputeId);
+    } catch (error) {
+      setNotice(errorMessage(error));
+    } finally {
+      setBusy(false);
+    }
+  }
+
   async function withdrawFunds() {
     const contractPromise = await getWriteContract();
     if (!contractPromise) return;
@@ -945,6 +962,7 @@ function App() {
       requestArbitration={requestArbitration}
       retryFailedStage={retryFailedStage}
       recoverFailedDispute={recoverFailedDispute}
+      markCurrentStageTimedOut={markCurrentStageTimedOut}
       withdrawFunds={withdrawFunds}
       loadReceipt={loadReceipt}
       shareVerdict={shareVerdict}
@@ -954,6 +972,7 @@ function App() {
       receiptLoading={receiptLoading}
       receiptError={receiptError}
       walletWithdrawable={walletWithdrawable}
+      readContract={readContract}
     />
   );
 }
@@ -988,7 +1007,7 @@ function Landing({ onOpenApp }) {
         <div className="hero">
           <div className="hero-eyebrow"><span className="dot" />Live on Somnia Testnet</div>
           <h1>The onchain<br /><em>AI court.</em></h1>
-          <p className="hero-sub">Two parties. One dispute. A jury of AI agents reads the evidence, deliberates on-chain, and enforces a binding verdict - automatically.</p>
+          <p className="hero-sub">Two parties. One dispute. Somnia validators execute an AI jury that reads the evidence and enforces the consensus verdict automatically.</p>
           <div className="hero-actions">
             <ConnectButton.Custom>
               {({ account, chain, mounted, openChainModal, openConnectModal }) => {
@@ -1037,7 +1056,7 @@ function Landing({ onOpenApp }) {
       <div className="built-on">
         <span className="built-on-label">Built on</span>
         <div className="somnia-badge"><span className="somnia-dot" /> Somnia Agentic L1</div>
-        <span className="built-on-label">Powered by deterministic on-chain AI</span>
+        <span className="built-on-label">Powered by validator-consensus AI</span>
       </div>
 
       <section id="how" className="section">
@@ -1069,9 +1088,9 @@ function Landing({ onOpenApp }) {
           <div className="deterministic-box">
             <div>
               <div className="mini-label">Powered by</div>
-              <div>Somnia deterministic LLMs - fixed seeds, consensus-verified outputs</div>
+              <div>Somnia validator-executed LLMs - independently executed, consensus-validated outputs</div>
             </div>
-            <div className="mono muted">Same input → same output → consensus → truth</div>
+            <div className="mono muted">Independent execution → validator consensus → enforceable result</div>
           </div>
         </div>
       </section>
@@ -1349,7 +1368,16 @@ function Create({ createDispute, busy }) {
   );
 }
 
-function Evidence({ disputeId, activeDispute, caseList, loadSelectedCase, submitEvidence, requestArbitration, retryFailedStage, recoverFailedDispute, withdrawFunds, joinDispute, busy, loadingCases, address }) {
+function Evidence({ disputeId, activeDispute, caseList, loadSelectedCase, submitEvidence, requestArbitration, retryFailedStage, recoverFailedDispute, withdrawFunds, joinDispute, busy, loadingCases, address, readContract }) {
+  const [minBudget, setMinBudget] = useState("");
+
+  useEffect(() => {
+    if (!readContract) return;
+    readContract.minimumAgentBudget()
+      .then((value) => setMinBudget(ethers.formatEther(value)))
+      .catch(() => {});
+  }, [readContract]);
+
   const currentCase = activeDispute || caseList.find((entry) => entry.id === disputeId) || null;
   const canArbitrate = currentCase && currentCase.plaintiffEvidenceUrl && currentCase.defendantEvidenceUrl;
   const state = Number(currentCase?.state ?? -1);
@@ -1415,14 +1443,14 @@ function Evidence({ disputeId, activeDispute, caseList, loadSelectedCase, submit
                 <div>
                   <div className="arbitration-action-title">Request Somnia Arbitration</div>
                   <div className="arbitration-action-subtitle">
-                    Launch the validator-executed agent jury to Deliberate and Deliver the Verdict.
+                    Launch the five-stage validator-executed agent jury. Minimum budget: <strong>{minBudget ? `${minBudget} STT` : "Reading from contract..."}</strong>
                   </div>
                 </div>
                 <div className="arbitration-budget-inputs">
                   <span>Agent Budget:</span>
-                  <input data-agent-budget type="number" min="1.28" step="0.01" defaultValue="1.28" className="stake-input" />
+                  <input data-agent-budget type="number" min={minBudget || undefined} step="0.01" defaultValue={minBudget} key={minBudget || "loading"} className="stake-input" disabled={!minBudget} />
                   <span className="mono">STT</span>
-                  <button className="btn btn-dark" onClick={requestArbitration} disabled={busy || !canArbitrate}>
+                  <button className="btn btn-dark" onClick={requestArbitration} disabled={busy || !canArbitrate || !minBudget}>
                     {busy ? "Starting..." : "Request arbitration →"}
                   </button>
                 </div>
@@ -1459,7 +1487,7 @@ function Evidence({ disputeId, activeDispute, caseList, loadSelectedCase, submit
   );
 }
 
-function LiveHearing({ events, activeDispute, disputeId, loadReceipt, caseList, loadSelectedCase, loadingCases }) {
+function LiveHearing({ events, activeDispute, disputeId, loadReceipt, caseList, loadSelectedCase, loadingCases, markCurrentStageTimedOut, busy }) {
   const hasRequest = Boolean(activeDispute?.latestRequestId);
   const state = Number(activeDispute?.state ?? -1);
   const isHearingComplete = state >= 4;
@@ -1510,7 +1538,10 @@ function LiveHearing({ events, activeDispute, disputeId, loadReceipt, caseList, 
             <StatMini label="Latest request" value={activeDispute?.latestRequestId || "—"} sub={activeDispute?.latestRequestId ? "Available on Somnia" : "No request yet"} />
             <StatMini label="Status" value={activeDispute?.stateLabel || "No case"} sub="Selected wallet case" />
           </div>
-          <div className="right-actions"><button className="btn btn-outline" onClick={() => loadReceipt()} disabled={!hasRequest}>Open latest receipt</button></div>
+          <div className="right-actions">
+            {isHearingActive && <button className="btn btn-outline" onClick={markCurrentStageTimedOut} disabled={busy}>Mark stage timed out</button>}
+            <button className="btn btn-outline" onClick={() => loadReceipt()} disabled={!hasRequest}>Open latest receipt</button>
+          </div>
         </>
       )}
     </div>

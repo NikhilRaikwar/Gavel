@@ -1,4 +1,4 @@
 User-agent: *
 Allow: /
 
-Sitemap: https://gavel.example.com/sitemap.xml
+Sitemap: https://gavel-nine.vercel.app/sitemap.xml
