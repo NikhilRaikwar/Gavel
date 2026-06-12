@@ -1,4 +1,5 @@
 export const DISPUTE_ESCROW_ABI = [
+  "function version() pure returns (string)",
   "function disputeCount() view returns (uint256)",
   "function createDispute(address defendant,string description) payable returns (uint256)",
   "function joinDispute(uint256 id) payable",
@@ -6,10 +7,12 @@ export const DISPUTE_ESCROW_ABI = [
   "function requestArbitration(uint256 id) payable returns (uint256)",
   "function retryFailedStage(uint256 id) payable returns (uint256)",
   "function recoverFailedDispute(uint256 id)",
+  "function markCurrentStageTimedOut(uint256 id)",
   "function claimExpiry(uint256 id)",
   "function withdraw()",
   "function minimumAgentBudget() view returns (uint256)",
   "function requiredBudget(uint8 stage) view returns (uint256)",
+  "function stageRequestedAt(uint256 id) view returns (uint256)",
   "function withdrawable(address account) view returns (uint256)",
   "function getPartyCaseIds(address party) view returns (uint256[])",
   "function getStageRequestIds(uint256 id) view returns (uint256[5])",

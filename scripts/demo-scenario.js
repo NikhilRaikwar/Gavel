@@ -27,7 +27,7 @@ async function main() {
   const disputeId = event.args.id;
   await escrow.connect(defendant).joinDispute(disputeId, { value: stake });
   await escrow.connect(plaintiff).submitEvidence(disputeId, "https://github.com/example/gavel-demo/commit/9f42");
-  await escrow.connect(defendant).submitEvidence(disputeId, "https://example.com/client-milestone-notes");
+  await escrow.connect(defendant).submitEvidence(disputeId, "https://github.com/NikhilRaikwar/Gavel/blob/main/agents/README.md");
 
   console.log("Demo dispute ready:", disputeId.toString());
 }
